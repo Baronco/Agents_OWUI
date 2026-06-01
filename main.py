@@ -3,7 +3,7 @@ import requests
 from json import dumps, loads
 
 
-def chat_with_model(prompt, model="asistente-de-ventas", api_key=None, base_url=None):
+def chat_with_model(prompt, model="asistente-de-ventas", tool_ids=None, api_key=None, base_url=None):
     """Envía un prompt a Open Web UI local y retorna la respuesta JSON."""
     base_url = base_url or os.getenv("OWUI_BASE_URL", "http://localhost:3000")
     api_key = api_key or os.getenv("OWUI_API_KEY")
@@ -29,6 +29,9 @@ def chat_with_model(prompt, model="asistente-de-ventas", api_key=None, base_url=
         ],
     }
 
+    if tool_ids:
+        payload["tool_ids"] = tool_ids
+
     response = requests.post(url, headers=headers, json=payload)
     try:
         response.raise_for_status()
@@ -42,8 +45,12 @@ def chat_with_model(prompt, model="asistente-de-ventas", api_key=None, base_url=
 
 
 def main():
-    prompt = "estoy buscando audifonos, cuales tienes"
-    result = chat_with_model(prompt, model="asistente-de-ventas")
+    prompt = "Estoy buscando audífonos, ¿cuáles tienes disponibles?"
+    result = chat_with_model(
+        prompt,
+        model="asistente-de-ventas",
+        tool_ids=["server:0"],  # Ecommerce Tool disponible en OWUI
+    )
     print(dumps(result, indent=2, ensure_ascii=False))
 
 
