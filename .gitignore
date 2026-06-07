@@ -9,3 +9,10 @@ wheels/
 # Virtual environments
 .venv
 .env
+
+# Universal
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+*.log
