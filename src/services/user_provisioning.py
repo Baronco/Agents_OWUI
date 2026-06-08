@@ -3,6 +3,8 @@ Creates or reuses a non‑admin OpenWebUI user via the client.
 """
 from typing import Dict, Optional
 
+import requests
+
 from src.client.openwebui_client import OpenWebUIClient
 from src.utils.logger import logger
 
@@ -35,7 +37,14 @@ def provision_user(
     email = _generate_email(username, tenant_id)
     password = _generate_password()
     try:
-        resp = c.create_user(name=username, email=email, password=password)
+        try:
+            resp = c.create_user(name=username, email=email, password=password)
+        except requests.HTTPError as signup_err:
+            if signup_err.response.status_code == 400:
+                logger.info("User already exists for %s, falling back to login", cache_key)
+                resp = c.login(email=email, password=password)
+            else:
+                raise
         user_id = resp.get("user_id") or resp.get("id")
         if not user_id:
             logger.error("OpenWebUI response missing user identifier: %s", resp)

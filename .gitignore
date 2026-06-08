@@ -16,3 +16,10 @@ Thumbs.db
 *.tmp
 *.swp
 *.log
+chat-export-1780805265444.json
+owui_openapi.json
+temp_test.py
+specs/
+.claude/
+.debug/
+CLAUDE.md

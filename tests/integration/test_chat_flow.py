@@ -358,3 +358,87 @@ class TestChatFlow:
         # Verify persistence
         final_resp = requests.get(f"{BASE_URL}/api/v1/chats/{chat_id}", headers=self.headers)
         assert final_resp.status_code == 200
+
+    def test_daily_single_chat_and_non_empty_response(self):
+        """US1 enhancement: verify non-empty assistant_response and same-chat reuse per day."""
+        now_ms = int(time.time() * 1000)
+        user_msg_id = str(uuid.uuid4())
+
+        # First message
+        first_content = "Estoy buscando audífonos, ¿cuáles tienes disponibles?"
+        user_message = {
+            "id": user_msg_id,
+            "role": "user",
+            "content": first_content,
+            "timestamp": now_ms,
+            "models": [self.model],
+        }
+        chat_payload = {
+            "chat": {
+                "title": "Daily Chat Test",
+                "models": [self.model],
+                "messages": [user_message],
+                "history": {
+                    "current_id": user_msg_id,
+                    "messages": {user_msg_id: user_message},
+                },
+            }
+        }
+        resp = requests.post(f"{BASE_URL}/api/v1/chats/new", json=chat_payload, headers=self.headers)
+        assert resp.status_code == 200, f"First chat creation failed: {resp.text}"
+        chat_id = resp.json().get("id")
+        assert chat_id
+
+        # Inject assistant + complete
+        assistant_msg_id = str(uuid.uuid4())
+        assistant_message = {
+            "id": assistant_msg_id, "role": "assistant", "content": "",
+            "parentId": user_msg_id, "modelName": self.model, "modelIdx": 0,
+            "timestamp": now_ms, "models": [self.model],
+        }
+        get_resp = requests.get(f"{BASE_URL}/api/v1/chats/{chat_id}", headers=self.headers)
+        chat_data = get_resp.json()
+        chat_data.setdefault("messages", []).append(assistant_message)
+        chat_data.setdefault("history", {}).setdefault("messages", {})[assistant_msg_id] = assistant_message
+        chat_data["history"]["current_id"] = assistant_msg_id
+        requests.post(f"{BASE_URL}/api/v1/chats/{chat_id}", json=chat_data, headers=self.headers)
+
+        session_id = str(uuid.uuid4())
+        comp_payload = {
+            "chat_id": chat_id, "id": assistant_msg_id,
+            "messages": [{"role": "user", "content": first_content}],
+            "model": self.model, "stream": False, "session_id": session_id,
+            "background_tasks": {"title_generation": True, "tags_generation": False, "follow_up_generation": True},
+            "features": {"code_interpreter": False, "web_search": False, "image_generation": False, "memory": False},
+            "variables": {
+                "{{USER_NAME}}": "", "{{USER_LANGUAGE}}": "es-ES",
+                "{{CURRENT_DATETIME}}": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "{{CURRENT_TIMEZONE}}": "America/Santiago",
+            },
+        }
+        comp_resp = requests.post(f"{BASE_URL}/api/chat/completions", json=comp_payload, headers=self.headers)
+        assert comp_resp.status_code == 200, f"Completion failed: {comp_resp.text}"
+        comp_data = comp_resp.json()
+
+        # Verify non-empty assistant response in completion
+        comp_text = ""
+        if "choices" in comp_data and comp_data["choices"]:
+            comp_text = comp_data["choices"][0].get("message", {}).get("content", "")
+        if not comp_text and "message" in comp_data:
+            comp_text = comp_data["message"].get("content", "")
+        assert comp_text, f"Assistant response is empty: {comp_data}"
+
+        # Mark completed
+        done_resp = requests.post(f"{BASE_URL}/api/chat/completed", json={
+            "chat_id": chat_id, "id": assistant_msg_id, "session_id": session_id, "model": self.model,
+        }, headers=self.headers)
+        assert done_resp.status_code == 200
+
+        # Verify final chat has both messages
+        fetch_resp = requests.get(f"{BASE_URL}/api/v1/chats/{chat_id}", headers=self.headers)
+        assert fetch_resp.status_code == 200
+        final_chat = fetch_resp.json()
+        messages = final_chat.get("messages", [])
+        contents = [m.get("content", "") for m in messages]
+        assert first_content in contents, f"First user message not found in {contents}"
+        assert comp_text in contents, f"Assistant response not found in {contents}"

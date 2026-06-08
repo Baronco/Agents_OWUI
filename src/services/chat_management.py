@@ -1,27 +1,287 @@
 """Chat management service.
 Handles creation and retrieval of chat sessions via the OpenWebUI backend API.
-Implements the full backend-controlled flow described in:
-https://github.com/open-webui/open-webui/discussions/11800
 """
 from typing import Dict, Optional
 import uuid
 import time
+import json as _json
+import html as _html
+import os
+
+import re
+import requests
 
 from src.client.openwebui_client import OpenWebUIClient
-from src.client.message_builder import build_completion_payload
 from src.services.tenant_routing import TenantConfig
 from src.utils.logger import logger
 
+_FUNC_LAUNCH_RE = re.compile(r'<function_launch>(.*?)</function_launch>', re.DOTALL)
+_DETAILS_BLOCK_RE = re.compile(r'<details[^>]*>.*?</details>', re.DOTALL)
+
+
+def _parse_function_launches(content: str) -> list:
+    """Extract (name, args_dict) pairs from <function_launch> XML blocks."""
+    results = []
+    for block in _FUNC_LAUNCH_RE.finditer(content):
+        inner = block.group(1)
+        name_match = re.search(r'<function_name>\s*(.*?)\s*</function_name>', inner, re.DOTALL)
+        params_match = re.search(r'<parameters>\s*(.*?)\s*</parameters>', inner, re.DOTALL)
+        if not name_match:
+            continue
+        name = name_match.group(1).strip()
+        try:
+            args = _json.loads(params_match.group(1).strip()) if params_match else {}
+        except Exception:
+            args = {}
+        results.append((name, args))
+    return results
+
+
+def _strip_function_launches(content: str) -> str:
+    """Remove <function_launch> XML blocks from content."""
+    return _FUNC_LAUNCH_RE.sub('', content).strip()
+
+
+def _strip_details_blocks(content: str) -> str:
+    """Remove <details type="tool_calls"> HTML blocks from content."""
+    return _DETAILS_BLOCK_RE.sub('', content).strip()
+
+
 client = OpenWebUIClient()
 
-# Simple in-memory store for demo; replace with DB as needed
 _chat_store: Dict[str, Dict] = {}
+_daily_chat_registry: Dict[str, str] = {}
+
+
+def _daily_key(username: str, tenant_id: str) -> str:
+    from datetime import date
+    return f"{username}:{tenant_id}:{date.today().isoformat()}"
+
+
+def resolve_daily_chat_id(username: str, tenant_id: str) -> Optional[str]:
+    return _daily_chat_registry.get(_daily_key(username, tenant_id))
+
+
+def register_daily_chat(username: str, tenant_id: str, chat_id: str) -> None:
+    _daily_chat_registry[_daily_key(username, tenant_id)] = chat_id
 
 
 def _resolve_client(owui_client: Optional[OpenWebUIClient] = None) -> OpenWebUIClient:
-    """Return the passed client if provided, otherwise the module-level default."""
     return owui_client if owui_client is not None else client
 
+
+# ---------------------------------------------------------------------------
+# Tool execution + direct completion loop
+# ---------------------------------------------------------------------------
+
+def _execute_tool(tool_name: str, arguments: dict) -> str:
+    ecommerce_base = os.getenv("ECOMMERCE_BASE_URL", "https://api-development-5d8c.up.railway.app")
+    ecommerce_key = os.getenv("ECOMMERCE_API_KEY", "")
+    tool_map = {
+        "search_catalog": ("POST", "/v1/catalog/search", "body"),
+        "list_catalog_products": ("GET", "/v1/catalog/products", "query"),
+        "get_catalog_product": ("GET", "/v1/catalog/products/{product_id}", "path+query"),
+        "lookup_catalog_inventory": ("POST", "/v1/catalog/inventory-lookup", "body"),
+        "compare_catalog_products": ("POST", "/v1/catalog/comparisons", "body"),
+        "suggest_cross_sell_products": ("POST", "/v1/catalog/cross-sell-suggestions", "body"),
+    }
+    if tool_name not in tool_map:
+        return _json.dumps({"error": f"Tool '{tool_name}' not registered"}, ensure_ascii=False)
+    method, path_template, _ = tool_map[tool_name]
+    path = path_template
+    for key in list(arguments.keys()):
+        if f"{{{key}}}" in path_template:
+            path = path.replace(f"{{{key}}}", str(arguments[key]))
+            arguments.pop(key)
+    url = f"{ecommerce_base}{path}"
+    headers = {"Authorization": f"Bearer {ecommerce_key}", "Content-Type": "application/json"}
+    try:
+        if method == "GET":
+            resp = requests.get(url, params=arguments, headers=headers, timeout=15)
+        else:
+            resp = requests.post(url, json=arguments, headers=headers, timeout=15)
+        resp.raise_for_status()
+        return _json.dumps(resp.json(), ensure_ascii=False)
+    except Exception as e:
+        return _json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+def _build_tool_response(final_text: str, tool_trace: list) -> tuple:
+    """Build OWUI-format content string and output array from accumulated tool trace.
+
+    Returns (content, output_list).  If tool_trace is empty returns (final_text, []).
+    tool_trace entries: {"call_id": str, "name": str, "args": dict, "result": str}
+    """
+    if not tool_trace:
+        return final_text, []
+
+    details_parts = []
+    output = []
+
+    for entry in tool_trace:
+        call_id = entry["call_id"]
+        name    = entry["name"]
+        args    = entry["args"]    # dict
+        result  = entry["result"]  # JSON string from _execute_tool
+
+        args_json  = _json.dumps(args)
+        # Wrap in outer quotes then HTML-escape → reproduces &quot;{...}&quot; format
+        args_attr  = _html.escape(f'"{args_json}"')
+        body_inner = _html.escape(f'"{result}"')
+
+        details_parts.append(
+            f'<details type="tool_calls" done="true"'
+            f' id="{call_id}" name="{name}"'
+            f' arguments="{args_attr}" files="" embeds="&quot;&quot;">\n'
+            f'<summary>Tool Executed</summary>\n'
+            f'{body_inner}\n'
+            f'</details>'
+        )
+        output.append({
+            "type": "function_call",
+            "id": call_id,
+            "call_id": call_id,
+            "name": name,
+            "arguments": args_json,
+            "status": "completed",
+        })
+        output.append({
+            "type": "function_call_output",
+            "id": f"fco_{uuid.uuid4().hex[:24]}",
+            "call_id": call_id,
+            "output": [{"type": "input_text", "text": result}],
+            "status": "completed",
+        })
+
+    output.append({
+        "type": "message",
+        "id": f"msg_{uuid.uuid4().hex[:24]}",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": final_text}],
+    })
+
+    content = "\n".join(details_parts)
+    if final_text:
+        content += "\n" + final_text
+    return content, output
+
+
+def _resolve_assistant_response(
+    owui_client: OpenWebUIClient,
+    model: str,
+    user_message_content: str,
+    tool_ids: Optional[list] = None,
+    history_msgs: Optional[list] = None,
+) -> tuple:
+    messages = list(history_msgs) if history_msgs else [{"role": "user", "content": user_message_content}]
+    tool_trace: list = []
+    for iteration in range(10):
+        logger.info("Direct completion iteration %d", iteration + 1)
+        payload = {"model": model, "messages": messages}
+        if tool_ids:
+            payload["tool_ids"] = tool_ids
+        url = f"{owui_client.base_url}/api/chat/completions"
+        resp = requests.post(url, headers=dict(owui_client.session.headers), json=payload, timeout=120)
+        resp.raise_for_status()
+        result = resp.json()
+        if "choices" not in result or not result["choices"]:
+            logger.warning("Direct completion returned no choices: %s", list(result.keys()))
+            continue
+        choice = result["choices"][0]
+        finish = choice.get("finish_reason")
+        message = choice.get("message", {})
+        logger.info("Direct iteration %d: finish_reason=%s", iteration + 1, finish)
+        if finish == "stop":
+            content = message.get("content", "")
+            # Some models return XML-style tool calls with finish_reason "stop"
+            # instead of using structured tool_calls. Detect and execute them.
+            xml_calls = _parse_function_launches(content)
+            if xml_calls:
+                logger.info("Detected %d XML-style tool call(s) in stop response", len(xml_calls))
+                messages.append({"role": "assistant", "content": content})
+                for tool_name, tool_args in xml_calls:
+                    call_id = f"call_{uuid.uuid4().hex[:24]}"
+                    logger.info("Executing XML-style tool: %s args: %s", tool_name, tool_args)
+                    tool_result = _execute_tool(tool_name, tool_args)
+                    tool_trace.append({
+                        "call_id": call_id,
+                        "name": tool_name,
+                        "args": tool_args,
+                        "result": tool_result,
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"<function_results>\n"
+                            f"<function_name>{tool_name}</function_name>\n"
+                            f"<result>\n{tool_result}\n</result>\n"
+                            f"</function_results>"
+                        ),
+                    })
+                continue
+            logger.info("Direct completion finished. Content length: %d", len(content))
+            return _build_tool_response(content, tool_trace)
+        if finish == "tool_calls":
+            tool_calls = message.get("tool_calls", [])
+            messages.append({"role": "assistant", "content": message.get("content"), "tool_calls": tool_calls})
+            for tc in tool_calls:
+                tool_name = tc["function"]["name"]
+                tool_args = _json.loads(tc["function"]["arguments"])
+                logger.info("Executing tool: %s with args: %s", tool_name, tool_args)
+                tool_result = _execute_tool(tool_name, tool_args)
+                tool_trace.append({
+                    "call_id": tc["id"],
+                    "name": tool_name,
+                    "args": tool_args,
+                    "result": tool_result,
+                })
+                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
+            continue
+        content = message.get("content", "")
+        if content:
+            logger.warning("Unexpected finish_reason=%s, returning content (len=%d)", finish, len(content))
+            return _build_tool_response(content, tool_trace)
+        if "content" in choice:
+            return _build_tool_response(choice.get("content", ""), tool_trace)
+    logger.warning("Max direct completion iterations reached")
+    return _build_tool_response("", tool_trace)
+
+
+# ---------------------------------------------------------------------------
+# History chain walker
+# ---------------------------------------------------------------------------
+
+def _walk_history_chain(history_messages: dict, tip_id: str) -> list:
+    """Walk parent chain from tip_id to root, return conversation messages in order."""
+    chain = []
+    visited: set = set()
+    node_id = tip_id
+    while node_id and node_id not in visited:
+        visited.add(node_id)
+        msg = history_messages.get(node_id)
+        if not msg:
+            break
+        chain.append(msg)
+        node_id = msg.get("parentId")
+    chain.reverse()
+    result = []
+    for m in chain:
+        if m.get("role") not in ("user", "assistant"):
+            continue
+        content = m.get("content", "")
+        if m["role"] == "assistant":
+            # Strip both XML tool call format and HTML <details> blocks so the
+            # model sees clean text when building continuation context.
+            content = _strip_details_blocks(_strip_function_launches(content))
+        if content:
+            result.append({"role": m["role"], "content": content})
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Chat lifecycle
+# ---------------------------------------------------------------------------
 
 def get_or_create_chat(
     user_id: str,
@@ -30,137 +290,82 @@ def get_or_create_chat(
     tenant_config: Optional[TenantConfig] = None,
     owui_client: Optional[OpenWebUIClient] = None,
 ) -> Optional[Dict[str, str]]:
-    """Return existing chat for the user if present, otherwise create a new one.
-
-    The creation flow follows OpenWebUI's backend-controlled pattern:
-    1. Create a new chat that already contains the initial user message.
-    2. Inject an empty assistant placeholder message.
-    3. Trigger the assistant completion.
-    4. Mark the assistant reply as completed.
-
-    Args:
-        user_id: The Open WebUI user ID.
-        assistant_id: The model/assistant name to use.
-        message_content: The actual user message text to include in the chat.
-        tenant_config: Optional TenantConfig with model, tools, system_prompt.
-        owui_client: Optional OpenWebUIClient instance (with user-scoped bearer token).
-    """
     c = _resolve_client(owui_client)
-
-    # Check existing chat mapping
     for chat in _chat_store.values():
         if chat["user_id"] == user_id and chat["assistant_id"] == assistant_id:
             logger.info("Reusing existing chat %s", chat["chat_id"])
             return chat
-
     try:
-        # --- 1. Generate IDs and timestamps ---
-        now_ms = int(time.time() * 1000)
+        now = int(time.time())
         user_msg_id = str(uuid.uuid4())
         assistant_msg_id = str(uuid.uuid4())
-        session_id = str(uuid.uuid4())
         model = (tenant_config or {}).get("model", assistant_id)
-        system_prompt = (tenant_config or {}).get("system_prompt", "")
+        tool_ids = (tenant_config or {}).get("tool_ids")
 
-        # --- 2. Build the initial user message with actual content ---
-        messages = []
-        history_messages = {}
+        # Get completion FIRST — no empty placeholder messages
+        completion_msgs = [{"role": "user", "content": message_content}]
+        assistant_content, tool_output = _resolve_assistant_response(
+            c, model, message_content, tool_ids, completion_msgs
+        )
+        # Plain text (no HTML) for the API response
+        assistant_text_plain = _strip_details_blocks(assistant_content)
 
-        # Prepend system prompt if configured
-        if system_prompt:
-            system_msg = {
-                "id": str(uuid.uuid4()),
-                "role": "user",
-                "content": system_prompt,
-                "timestamp": now_ms,
-                "models": [model],
-            }
-            messages.append(system_msg)
-            history_messages[system_msg["id"]] = system_msg
-
+        # Build complete message objects with proper parent/child chain
         user_message = {
             "id": user_msg_id,
+            "parentId": None,
+            "childrenIds": [assistant_msg_id],
             "role": "user",
             "content": message_content,
-            "timestamp": now_ms,
+            "timestamp": now,
             "models": [model],
         }
-        messages.append(user_message)
-        history_messages[user_msg_id] = user_message
-
-        # --- 3. Create chat with that initial user message ---
-        resp = c.create_chat_with_initial_message(
-            user_id=user_id,
-            title="New Chat",
-            model=model,
-            user_message=user_message,
-            additional_messages=messages,
-            additional_history=history_messages,
-        )
-        chat_id = resp.get("chat_id") or resp.get("id")
-        if not chat_id:
-            logger.error("OpenWebUI create chat response missing ID: %s", resp)
-            return None
-
-        # --- 4. Build the empty assistant placeholder message ---
         assistant_message = {
             "id": assistant_msg_id,
-            "role": "assistant",
-            "content": "",
             "parentId": user_msg_id,
-            "modelName": model,
-            "modelIdx": 0,
-            "timestamp": now_ms,
+            "childrenIds": [],
+            "role": "assistant",
+            "content": assistant_content,  # includes <details> HTML when tools were used
+            "timestamp": now,
             "models": [model],
+            "done": True,
         }
+        if tool_output:
+            assistant_message["output"] = tool_output
 
-        c.inject_assistant_message(chat_id, assistant_message)
+        # Persist to OWUI with completed state — single POST, no subsequent patching
+        title = (message_content[:60] + "…") if len(message_content) > 60 else message_content
+        resp = c._post("/api/v1/chats/new", {
+            "chat": {
+                "title": title,
+                "models": [model],
+                "messages": [{"role": "user", "content": message_content}],
+                "history": {
+                    "currentId": assistant_msg_id,
+                    "messages": {
+                        user_msg_id: user_message,
+                        assistant_msg_id: assistant_message,
+                    },
+                },
+            }
+        })
+        chat_id = resp.get("chat_id") or resp.get("id")
+        if not chat_id:
+            logger.error("OWUI create chat response missing ID: %s", resp)
+            return None
 
-        # --- 5. Trigger assistant reply with proper payload ---
-        payload = build_completion_payload(
-            chat_id=chat_id,
-            assistant_msg_id=assistant_msg_id,
-            message_content=message_content,
-            model=model,
-            session_id=session_id,
-        )
-        tool_ids = (tenant_config or {}).get("tool_ids")
-        completion_resp = _process_completion_with_tools(
-            chat_id=chat_id,
-            assistant_msg_id=assistant_msg_id,
-            initial_payload=payload,
-            session_id=session_id,
-            model=model,
-            tool_ids=tool_ids,
-            owui_client=c,
-        )
-        assistant_text = _extract_assistant_text(completion_resp)
-        follow_ups = _extract_follow_ups(completion_resp)
-
-        # --- 6. Mark completion ---
-        c.complete_chat(
-            chat_id=chat_id,
-            assistant_msg_id=assistant_msg_id,
-            session_id=session_id,
-            model=model,
-        )
-
-        # --- 7. Store locally and return ---
         chat = {
             "chat_id": chat_id,
             "user_id": user_id,
             "assistant_id": assistant_id,
-            "session_id": session_id,
             "last_message_id": assistant_msg_id,
-            "assistant_response": assistant_text,
-            "follow_ups": follow_ups,
+            "assistant_response": assistant_text_plain,
+            "follow_ups": [],
+            "_messages": [user_message, assistant_message],
         }
         _chat_store[chat_id] = chat
-        logger.info(
-            "Created new chat %s for user %s with assistant_id %s", chat_id, user_id, assistant_id
-        )
+        logger.info("Created chat %s for user %s", chat_id, user_id)
         return chat
-
     except Exception as exc:
         logger.error("Failed to create chat: %s", exc)
         return None
@@ -171,227 +376,87 @@ def continue_chat(
     message_content: str,
     assistant_id: str,
     owui_client: Optional[OpenWebUIClient] = None,
+    tenant_config: Optional[TenantConfig] = None,
 ) -> Optional[Dict[str, str]]:
-    """Append a new user message to an existing chat and trigger a new assistant reply.
-
-    Implements multi-turn flow:
-    1. Retrieve existing chat state from local store.
-    2. Append the new user message with parentId set to the last assistant message.
-    3. Inject a new empty assistant placeholder.
-    4. Trigger completion with full history.
-    5. Mark completed.
-    """
     c = _resolve_client(owui_client)
     existing = _chat_store.get(chat_id)
     if not existing:
         logger.error("Chat %s not found in local store", chat_id)
         return None
-
     try:
-        now_ms = int(time.time() * 1000)
+        now = int(time.time())
         new_user_msg_id = str(uuid.uuid4())
         new_assistant_msg_id = str(uuid.uuid4())
-        session_id = existing.get("session_id", str(uuid.uuid4()))
         model = assistant_id
+        tool_ids = (tenant_config or {}).get("tool_ids")
 
-        # Get the current chat from OWUI
+        # Fetch authoritative chat state from OWUI
         current_chat = c.get_chat(chat_id)
+        current_inner = c._chat_inner(current_chat)
+        current_history = current_inner.setdefault("history", {})
+        history_messages = current_history.setdefault("messages", {})
 
-        # Build the new user message
+        # Resolve the actual current tip from OWUI (may differ from our local store)
+        current_last_id = (
+            current_history.get("currentId")
+            or current_history.get("current_id")
+            or existing.get("last_message_id")
+        )
+
+        # Build completion context by walking the persisted chain
+        completion_msgs = _walk_history_chain(history_messages, current_last_id)
+        completion_msgs.append({"role": "user", "content": message_content})
+
+        # Get completion before modifying chat state
+        assistant_content, tool_output = _resolve_assistant_response(
+            c, model, message_content, tool_ids=tool_ids, history_msgs=completion_msgs
+        )
+        assistant_text_plain = _strip_details_blocks(assistant_content)
+
+        # Build new messages
         new_user_message = {
             "id": new_user_msg_id,
+            "parentId": current_last_id,
+            "childrenIds": [new_assistant_msg_id],
             "role": "user",
             "content": message_content,
-            "parentId": existing.get("last_message_id"),
-            "timestamp": now_ms,
+            "timestamp": now,
             "models": [model],
         }
-
-        # Append to both messages[] and history.messages{}
-        current_chat.setdefault("messages", []).append(new_user_message)
-        current_chat.setdefault("history", {}).setdefault("messages", {})[new_user_msg_id] = new_user_message
-        current_chat["history"]["current_id"] = new_user_msg_id
-
-        # Push updated chat back
-        c._post(f"/api/v1/chats/{chat_id}", current_chat)
-
-        # Inject new empty assistant message
         new_assistant_message = {
             "id": new_assistant_msg_id,
-            "role": "assistant",
-            "content": "",
             "parentId": new_user_msg_id,
-            "modelName": model,
-            "modelIdx": 0,
-            "timestamp": now_ms,
+            "childrenIds": [],
+            "role": "assistant",
+            "content": assistant_content,  # includes <details> HTML when tools were used
+            "timestamp": now,
             "models": [model],
+            "done": True,
         }
-        c.inject_assistant_message(chat_id, new_assistant_message)
+        if tool_output:
+            new_assistant_message["output"] = tool_output
 
-        # Trigger completion with full history
-        all_messages = []
-        if "history" in current_chat and "messages" in current_chat["history"]:
-            for msg_id, msg in current_chat["history"]["messages"].items():
-                all_messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+        # Extend the chain: last message → new user → new assistant
+        if current_last_id and current_last_id in history_messages:
+            prev = dict(history_messages[current_last_id])
+            prev["childrenIds"] = [new_user_msg_id]
+            history_messages[current_last_id] = prev
+        history_messages[new_user_msg_id] = new_user_message
+        history_messages[new_assistant_msg_id] = new_assistant_message
+        current_history["currentId"] = new_assistant_msg_id
+        current_history.pop("current_id", None)
 
-        payload = build_completion_payload(
-            chat_id=chat_id,
-            assistant_msg_id=new_assistant_msg_id,
-            message_content=message_content,
-            model=model,
-            session_id=session_id,
-        )
-        # Replace the single-message messages with full history
-        payload["messages"] = all_messages
+        c._post(f"/api/v1/chats/{chat_id}", {"chat": current_inner})
 
-        completion_resp = _process_completion_with_tools(
-            chat_id=chat_id,
-            assistant_msg_id=new_assistant_msg_id,
-            initial_payload=payload,
-            session_id=session_id,
-            model=model,
-            owui_client=c,
-        )
-
-        # Mark completed
-        c.complete_chat(
-            chat_id=chat_id,
-            assistant_msg_id=new_assistant_msg_id,
-            session_id=session_id,
-            model=model,
-        )
-
-        assistant_text = _extract_assistant_text(completion_resp)
-        follow_ups = _extract_follow_ups(completion_resp)
-
-        # Update local store
         existing["last_message_id"] = new_assistant_msg_id
-        existing["session_id"] = session_id
-        existing["assistant_response"] = assistant_text
-        existing["follow_ups"] = follow_ups
-
+        existing["assistant_response"] = assistant_text_plain
+        existing["follow_ups"] = []
+        existing.setdefault("_messages", []).extend([new_user_message, new_assistant_message])
         return existing
-
     except Exception as exc:
         logger.error("Failed to continue chat %s: %s", chat_id, exc)
         return None
 
 
 def persist_message(chat_id: str, role: str, content: str) -> None:
-    """Persist a message; placeholder that could store in SQLite.
-    Currently just logs the operation.
-    """
     logger.info("Persisting %s message for chat %s", role, chat_id)
-
-
-def _extract_assistant_text(completion_resp: dict) -> str:
-    """Extract the assistant text from a chat completion response."""
-    if "choices" in completion_resp and len(completion_resp["choices"]) > 0:
-        return completion_resp["choices"][0].get("message", {}).get("content", "")
-    if "message" in completion_resp:
-        return completion_resp["message"].get("content", "")
-    return ""
-
-
-def _extract_follow_ups(completion_resp: dict) -> list:
-    """Extract follow-up questions from a chat completion response."""
-    return completion_resp.get("followUps", [])
-
-
-def _extract_tool_calls(completion_resp: dict) -> list:
-    """Extract tool_calls from a chat completion response."""
-    if "choices" in completion_resp and len(completion_resp["choices"]) > 0:
-        return completion_resp["choices"][0].get("message", {}).get("tool_calls", [])
-    return []
-
-
-def _execute_tool(tool_name: str, arguments: dict) -> str:
-    """Execute a tool via the ecommerce API and return the result as JSON string."""
-    import os, json, requests
-
-    ecommerce_base = os.getenv("ECOMMERCE_BASE_URL", "https://api-development-5d8c.up.railway.app")
-    ecommerce_key = os.getenv("ECOMMERCE_API_KEY", "")
-
-    tool_map = {
-        "search_catalog": ("POST", "/v1/catalog/search", "body"),
-        "list_catalog_products": ("GET", "/v1/catalog/products", "query"),
-        "get_catalog_product": ("GET", "/v1/catalog/products/{product_id}", "path+query"),
-        "lookup_catalog_inventory": ("POST", "/v1/catalog/inventory-lookup", "body"),
-        "compare_catalog_products": ("POST", "/v1/catalog/comparisons", "body"),
-        "suggest_cross_sell_products": ("POST", "/v1/catalog/cross-sell-suggestions", "body"),
-    }
-
-    if tool_name not in tool_map:
-        return json.dumps({"error": f"Tool '{tool_name}' not registered"}, ensure_ascii=False)
-
-    method, path_template, _ = tool_map[tool_name]
-    path = path_template
-    for key in list(arguments.keys()):
-        placeholder = f"{{{key}}}"
-        if placeholder in path_template:
-            path = path.replace(placeholder, str(arguments[key]))
-            arguments.pop(key)
-
-    url = f"{ecommerce_base}{path}"
-    headers = {
-        "Authorization": f"Bearer {ecommerce_key}",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        if method == "GET":
-            resp = requests.get(url, params=arguments, headers=headers, timeout=15)
-        else:
-            resp = requests.post(url, json=arguments, headers=headers, timeout=15)
-        resp.raise_for_status()
-        return json.dumps(resp.json(), ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({"error": str(e)}, ensure_ascii=False)
-
-
-def _process_completion_with_tools(
-    chat_id: str,
-    assistant_msg_id: str,
-    initial_payload: dict,
-    session_id: str,
-    model: str,
-    tool_ids: Optional[list] = None,
-    owui_client: Optional[OpenWebUIClient] = None,
-) -> dict:
-    """Send a completion request and handle any tool_calls in the response.
-    Returns the final completion response after all tool calls are resolved.
-    """
-    c = _resolve_client(owui_client)
-    payload = dict(initial_payload)
-    max_iterations = 8
-
-    for iteration in range(max_iterations):
-        if tool_ids:
-            payload["tool_ids"] = tool_ids
-        resp = c.chat_completion(payload)
-
-        tool_calls = _extract_tool_calls(resp)
-        if not tool_calls:
-            return resp
-
-        # Process each tool call
-        assistant_msg = resp.get("choices", [{}])[0].get("message", {})
-        payload["messages"].append({
-            "role": "assistant",
-            "content": assistant_msg.get("content"),
-            "tool_calls": tool_calls,
-        })
-
-        for tc in tool_calls:
-            tool_name = tc["function"]["name"]
-            import json
-            tool_args = json.loads(tc["function"]["arguments"])
-            logger.info("Executing tool: %s with args: %s", tool_name, tool_args)
-            tool_result = _execute_tool(tool_name, tool_args)
-            payload["messages"].append({
-                "role": "tool",
-                "tool_call_id": tc["id"],
-                "content": tool_result,
-            })
-
-    return resp
