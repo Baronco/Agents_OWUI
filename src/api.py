@@ -10,8 +10,8 @@ from typing import Optional
 import threading
 
 from src.services.tenant_routing import resolve_assistant, resolve_tenant_config
-from src.services.user_provisioning import provision_user
-from src.services.chat_management import get_or_create_chat, continue_chat, persist_message, resolve_daily_chat_id, register_daily_chat
+from src.services.user_provisioning import provision_user, update_cached_chat_id
+from src.services.chat_management import get_or_create_chat, continue_chat
 from src.client.openwebui_client import OpenWebUIClient
 from src.utils.logger import logger
 
@@ -28,11 +28,13 @@ def _get_user_lock(username: str, tenant_id: str) -> threading.Lock:
             _user_locks[key] = threading.Lock()
         return _user_locks[key]
 
+
 class ChatRequest(BaseModel):
     username: str
     tenant_id: str
     message: str
     chat_id: Optional[str] = None
+
 
 class ChatResponse(BaseModel):
     assistant_response: str
@@ -42,6 +44,7 @@ class ChatResponse(BaseModel):
     tenant_id: str
     timestamp: str
     follow_ups: list[str] = []
+
 
 @app.post("/proxy/chat", response_model=ChatResponse)
 async def proxy_chat(request: ChatRequest):
@@ -59,25 +62,33 @@ async def proxy_chat(request: ChatRequest):
     if not user_info:
         raise HTTPException(status_code=500, detail="User provisioning failed")
 
-    if request.chat_id:
-        chat = continue_chat(request.chat_id, request.message, assistant_id, owui_client=client, tenant_config=tenant_config)
-        if not chat:
-            raise HTTPException(status_code=500, detail="Chat continuation failed")
-    else:
-        existing_chat_id = resolve_daily_chat_id(request.username, request.tenant_id)
-        if existing_chat_id:
-            logger.info("Reusing daily chat %s for user %s", existing_chat_id, request.username)
-            chat = continue_chat(existing_chat_id, request.message, assistant_id, owui_client=client, tenant_config=tenant_config)
-            if not chat:
-                raise HTTPException(status_code=500, detail="Daily chat continuation failed")
-        else:
-            chat = get_or_create_chat(user_info["user_id"], assistant_id, request.message, tenant_config=tenant_config, owui_client=client)
-            if not chat:
-                raise HTTPException(status_code=500, detail="Chat creation failed")
-            register_daily_chat(request.username, request.tenant_id, chat["chat_id"])
+    per_user_client = client.with_token(user_info["token"])
 
-    persist_message(chat["chat_id"], "user", request.message)
-    persist_message(chat["chat_id"], "assistant", chat.get("assistant_response", ""))
+    # Priority: explicit request.chat_id > stored chat_id from cache > new chat.
+    # On is_new_session (token refresh) always start fresh regardless of cache.
+    if user_info.get("is_new_session"):
+        effective_chat_id = None
+    else:
+        effective_chat_id = request.chat_id or user_info.get("chat_id")
+
+    if effective_chat_id:
+        chat = continue_chat(
+            effective_chat_id, request.message, assistant_id,
+            owui_client=per_user_client, tenant_config=tenant_config,
+        )
+        if not chat:
+            logger.warning("continue_chat failed for %s — falling back to new chat", effective_chat_id)
+            update_cached_chat_id(user_info["email"], None)
+            chat = None  # fall through to get_or_create_chat below
+    if not effective_chat_id or chat is None:
+        chat = get_or_create_chat(
+            user_info["user_id"], assistant_id, request.message,
+            tenant_config=tenant_config, owui_client=per_user_client,
+        )
+        if not chat:
+            raise HTTPException(status_code=500, detail="Chat creation failed")
+
+    update_cached_chat_id(user_info["email"], chat["chat_id"])
 
     assistant_response = chat.get("assistant_response", "")
     if not assistant_response:

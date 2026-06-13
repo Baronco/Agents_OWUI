@@ -127,7 +127,7 @@ def chat_with_tools(prompt, model="asistente-de-ventas", tool_ids=None):
 
 
 def main():
-    prompt = "estoy buscando audífonos, ¿cuáles tienes disponibles?"
+    prompt = "buen dia"
     content = chat_with_tools(prompt, model="asistente-de-ventas", tool_ids=["server:0"])
     print("\n" + "=" * 50)
     print("RESPUESTA FINAL:")

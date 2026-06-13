@@ -33,7 +33,7 @@ class OpenWebUIClient:
         return resp
 
     def login(self, email: str, password: str) -> Dict[str, Any]:
-        resp = self._post("/api/v1/auths/login", {
+        resp = self._post("/api/v1/auths/signin", {
             "email": email,
             "password": password,
         })
@@ -43,7 +43,7 @@ class OpenWebUIClient:
         return resp
 
     def get_chat(self, chat_id: str) -> Dict[str, Any]:
-        resp = requests.get(f"{self.base_url}/api/v1/chats/{chat_id}", headers=self.session.headers)
+        resp = self.session.get(f"{self.base_url}/api/v1/chats/{chat_id}")
         resp.raise_for_status()
         return resp.json()
 
@@ -51,6 +51,24 @@ class OpenWebUIClient:
     def _chat_inner(chat_response: Dict[str, Any]) -> Dict[str, Any]:
         return chat_response.get("chat", chat_response) if isinstance(chat_response, dict) else chat_response
 
+    def with_token(self, token: str) -> "OpenWebUIClient":
+        """Return a new client instance authenticated with the given bearer token."""
+        new_client = OpenWebUIClient(self.base_url)
+        new_client.session.headers.update({"Authorization": f"Bearer {token}"})
+        return new_client
+
     def chat_completion(self, payload: dict) -> Dict[str, Any]:
         """Call /api/chat/completions (OpenAI-compatible direct endpoint)."""
         return self._post("/api/chat/completions", payload)
+
+    def chat_completion_sync(self, payload: dict) -> Dict[str, Any]:
+        """POST /api/chat/completions and return the JSON response.
+
+        When chat_id is included, OWUI processes the request asynchronously and
+        returns {status: True, task_ids: [...]}. The caller must poll the chat
+        history to read the completed assistant message.
+        """
+        url = f"{self.base_url}/api/chat/completions"
+        resp = self.session.post(url, json=payload, timeout=60)
+        resp.raise_for_status()
+        return resp.json()

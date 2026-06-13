@@ -16,6 +16,7 @@ Thumbs.db
 *.tmp
 *.swp
 *.log
+token_store.json
 chat-export-1780805265444.json
 owui_openapi.json
 temp_test.py
@@ -24,3 +25,5 @@ specs/
 .debug/
 CLAUDE.md
 .specify/
+token_store.json
+open-webui/

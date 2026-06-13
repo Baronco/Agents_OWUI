@@ -1,5 +1,5 @@
 """Chat management service.
-Handles creation and retrieval of chat sessions via the OpenWebUI backend API.
+Stateless — all chat data lives in Open WebUI. No local caches or registries.
 """
 from typing import Dict, Optional
 import uuid
@@ -7,7 +7,6 @@ import time
 import json as _json
 import html as _html
 import os
-
 import re
 import requests
 
@@ -20,7 +19,6 @@ _DETAILS_BLOCK_RE = re.compile(r'<details[^>]*>.*?</details>', re.DOTALL)
 
 
 def _parse_function_launches(content: str) -> list:
-    """Extract (name, args_dict) pairs from <function_launch> XML blocks."""
     results = []
     for block in _FUNC_LAUNCH_RE.finditer(content):
         inner = block.group(1)
@@ -38,40 +36,15 @@ def _parse_function_launches(content: str) -> list:
 
 
 def _strip_function_launches(content: str) -> str:
-    """Remove <function_launch> XML blocks from content."""
     return _FUNC_LAUNCH_RE.sub('', content).strip()
 
 
 def _strip_details_blocks(content: str) -> str:
-    """Remove <details type="tool_calls"> HTML blocks from content."""
     return _DETAILS_BLOCK_RE.sub('', content).strip()
 
 
-client = OpenWebUIClient()
-
-_chat_store: Dict[str, Dict] = {}
-_daily_chat_registry: Dict[str, str] = {}
-
-
-def _daily_key(username: str, tenant_id: str) -> str:
-    from datetime import date
-    return f"{username}:{tenant_id}:{date.today().isoformat()}"
-
-
-def resolve_daily_chat_id(username: str, tenant_id: str) -> Optional[str]:
-    return _daily_chat_registry.get(_daily_key(username, tenant_id))
-
-
-def register_daily_chat(username: str, tenant_id: str, chat_id: str) -> None:
-    _daily_chat_registry[_daily_key(username, tenant_id)] = chat_id
-
-
-def _resolve_client(owui_client: Optional[OpenWebUIClient] = None) -> OpenWebUIClient:
-    return owui_client if owui_client is not None else client
-
-
 # ---------------------------------------------------------------------------
-# Tool execution + direct completion loop
+# Tool execution
 # ---------------------------------------------------------------------------
 
 def _execute_tool(tool_name: str, arguments: dict) -> str:
@@ -107,11 +80,6 @@ def _execute_tool(tool_name: str, arguments: dict) -> str:
 
 
 def _build_tool_response(final_text: str, tool_trace: list) -> tuple:
-    """Build OWUI-format content string and output array from accumulated tool trace.
-
-    Returns (content, output_list).  If tool_trace is empty returns (final_text, []).
-    tool_trace entries: {"call_id": str, "name": str, "args": dict, "result": str}
-    """
     if not tool_trace:
         return final_text, []
 
@@ -121,11 +89,10 @@ def _build_tool_response(final_text: str, tool_trace: list) -> tuple:
     for entry in tool_trace:
         call_id = entry["call_id"]
         name    = entry["name"]
-        args    = entry["args"]    # dict
-        result  = entry["result"]  # JSON string from _execute_tool
+        args    = entry["args"]
+        result  = entry["result"]
 
         args_json  = _json.dumps(args)
-        # Wrap in outer quotes then HTML-escape → reproduces &quot;{...}&quot; format
         args_attr  = _html.escape(f'"{args_json}"')
         body_inner = _html.escape(f'"{result}"')
 
@@ -194,8 +161,6 @@ def _resolve_assistant_response(
         logger.info("Direct iteration %d: finish_reason=%s", iteration + 1, finish)
         if finish == "stop":
             content = message.get("content", "")
-            # Some models return XML-style tool calls with finish_reason "stop"
-            # instead of using structured tool_calls. Detect and execute them.
             xml_calls = _parse_function_launches(content)
             if xml_calls:
                 logger.info("Detected %d XML-style tool call(s) in stop response", len(xml_calls))
@@ -204,12 +169,7 @@ def _resolve_assistant_response(
                     call_id = f"call_{uuid.uuid4().hex[:24]}"
                     logger.info("Executing XML-style tool: %s args: %s", tool_name, tool_args)
                     tool_result = _execute_tool(tool_name, tool_args)
-                    tool_trace.append({
-                        "call_id": call_id,
-                        "name": tool_name,
-                        "args": tool_args,
-                        "result": tool_result,
-                    })
+                    tool_trace.append({"call_id": call_id, "name": tool_name, "args": tool_args, "result": tool_result})
                     messages.append({
                         "role": "user",
                         "content": (
@@ -230,12 +190,7 @@ def _resolve_assistant_response(
                 tool_args = _json.loads(tc["function"]["arguments"])
                 logger.info("Executing tool: %s with args: %s", tool_name, tool_args)
                 tool_result = _execute_tool(tool_name, tool_args)
-                tool_trace.append({
-                    "call_id": tc["id"],
-                    "name": tool_name,
-                    "args": tool_args,
-                    "result": tool_result,
-                })
+                tool_trace.append({"call_id": tc["id"], "name": tool_name, "args": tool_args, "result": tool_result})
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": tool_result})
             continue
         content = message.get("content", "")
@@ -253,7 +208,6 @@ def _resolve_assistant_response(
 # ---------------------------------------------------------------------------
 
 def _walk_history_chain(history_messages: dict, tip_id: str) -> list:
-    """Walk parent chain from tip_id to root, return conversation messages in order."""
     chain = []
     visited: set = set()
     node_id = tip_id
@@ -271,8 +225,6 @@ def _walk_history_chain(history_messages: dict, tip_id: str) -> list:
             continue
         content = m.get("content", "")
         if m["role"] == "assistant":
-            # Strip both XML tool call format and HTML <details> blocks so the
-            # model sees clean text when building continuation context.
             content = _strip_details_blocks(_strip_function_launches(content))
         if content:
             result.append({"role": m["role"], "content": content})
@@ -290,11 +242,8 @@ def get_or_create_chat(
     tenant_config: Optional[TenantConfig] = None,
     owui_client: Optional[OpenWebUIClient] = None,
 ) -> Optional[Dict[str, str]]:
-    c = _resolve_client(owui_client)
-    for chat in _chat_store.values():
-        if chat["user_id"] == user_id and chat["assistant_id"] == assistant_id:
-            logger.info("Reusing existing chat %s", chat["chat_id"])
-            return chat
+    """Always creates a new chat. Never reuses an existing session."""
+    c = owui_client
     try:
         now = int(time.time())
         user_msg_id = str(uuid.uuid4())
@@ -302,15 +251,12 @@ def get_or_create_chat(
         model = (tenant_config or {}).get("model", assistant_id)
         tool_ids = (tenant_config or {}).get("tool_ids")
 
-        # Get completion FIRST — no empty placeholder messages
         completion_msgs = [{"role": "user", "content": message_content}]
         assistant_content, tool_output = _resolve_assistant_response(
             c, model, message_content, tool_ids, completion_msgs
         )
-        # Plain text (no HTML) for the API response
         assistant_text_plain = _strip_details_blocks(assistant_content)
 
-        # Build complete message objects with proper parent/child chain
         user_message = {
             "id": user_msg_id,
             "parentId": None,
@@ -325,7 +271,7 @@ def get_or_create_chat(
             "parentId": user_msg_id,
             "childrenIds": [],
             "role": "assistant",
-            "content": assistant_content,  # includes <details> HTML when tools were used
+            "content": assistant_content,
             "timestamp": now,
             "models": [model],
             "done": True,
@@ -333,7 +279,6 @@ def get_or_create_chat(
         if tool_output:
             assistant_message["output"] = tool_output
 
-        # Persist to OWUI with completed state — single POST, no subsequent patching
         title = (message_content[:60] + "…") if len(message_content) > 60 else message_content
         resp = c._post("/api/v1/chats/new", {
             "chat": {
@@ -354,18 +299,14 @@ def get_or_create_chat(
             logger.error("OWUI create chat response missing ID: %s", resp)
             return None
 
-        chat = {
+        logger.info("Created chat %s for user %s", chat_id, user_id)
+        return {
             "chat_id": chat_id,
-            "user_id": user_id,
             "assistant_id": assistant_id,
             "last_message_id": assistant_msg_id,
             "assistant_response": assistant_text_plain,
             "follow_ups": [],
-            "_messages": [user_message, assistant_message],
         }
-        _chat_store[chat_id] = chat
-        logger.info("Created chat %s for user %s", chat_id, user_id)
-        return chat
     except Exception as exc:
         logger.error("Failed to create chat: %s", exc)
         return None
@@ -378,11 +319,10 @@ def continue_chat(
     owui_client: Optional[OpenWebUIClient] = None,
     tenant_config: Optional[TenantConfig] = None,
 ) -> Optional[Dict[str, str]]:
-    c = _resolve_client(owui_client)
-    existing = _chat_store.get(chat_id)
-    if not existing:
-        logger.error("Chat %s not found in local store", chat_id)
-        return None
+    """Continue an existing chat by fetching its history from Open WebUI.
+    Works without any local state — survives proxy restarts.
+    """
+    c = owui_client
     try:
         now = int(time.time())
         new_user_msg_id = str(uuid.uuid4())
@@ -390,30 +330,27 @@ def continue_chat(
         model = assistant_id
         tool_ids = (tenant_config or {}).get("tool_ids")
 
-        # Fetch authoritative chat state from OWUI
         current_chat = c.get_chat(chat_id)
         current_inner = c._chat_inner(current_chat)
         current_history = current_inner.setdefault("history", {})
         history_messages = current_history.setdefault("messages", {})
 
-        # Resolve the actual current tip from OWUI (may differ from our local store)
         current_last_id = (
             current_history.get("currentId")
             or current_history.get("current_id")
-            or existing.get("last_message_id")
         )
+        if not current_last_id:
+            logger.error("Chat %s has no currentId in history", chat_id)
+            return None
 
-        # Build completion context by walking the persisted chain
         completion_msgs = _walk_history_chain(history_messages, current_last_id)
         completion_msgs.append({"role": "user", "content": message_content})
 
-        # Get completion before modifying chat state
         assistant_content, tool_output = _resolve_assistant_response(
             c, model, message_content, tool_ids=tool_ids, history_msgs=completion_msgs
         )
         assistant_text_plain = _strip_details_blocks(assistant_content)
 
-        # Build new messages
         new_user_message = {
             "id": new_user_msg_id,
             "parentId": current_last_id,
@@ -428,7 +365,7 @@ def continue_chat(
             "parentId": new_user_msg_id,
             "childrenIds": [],
             "role": "assistant",
-            "content": assistant_content,  # includes <details> HTML when tools were used
+            "content": assistant_content,
             "timestamp": now,
             "models": [model],
             "done": True,
@@ -436,7 +373,6 @@ def continue_chat(
         if tool_output:
             new_assistant_message["output"] = tool_output
 
-        # Extend the chain: last message → new user → new assistant
         if current_last_id and current_last_id in history_messages:
             prev = dict(history_messages[current_last_id])
             prev["childrenIds"] = [new_user_msg_id]
@@ -448,15 +384,13 @@ def continue_chat(
 
         c._post(f"/api/v1/chats/{chat_id}", {"chat": current_inner})
 
-        existing["last_message_id"] = new_assistant_msg_id
-        existing["assistant_response"] = assistant_text_plain
-        existing["follow_ups"] = []
-        existing.setdefault("_messages", []).extend([new_user_message, new_assistant_message])
-        return existing
+        return {
+            "chat_id": chat_id,
+            "assistant_id": assistant_id,
+            "last_message_id": new_assistant_msg_id,
+            "assistant_response": assistant_text_plain,
+            "follow_ups": [],
+        }
     except Exception as exc:
         logger.error("Failed to continue chat %s: %s", chat_id, exc)
         return None
-
-
-def persist_message(chat_id: str, role: str, content: str) -> None:
-    logger.info("Persisting %s message for chat %s", role, chat_id)
