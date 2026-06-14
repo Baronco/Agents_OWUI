@@ -63,20 +63,11 @@ def _generate_password(email: str) -> str:
     return digest[:32]
 
 
-def _ping_token(owui_client: OpenWebUIClient, token: str) -> bool:
-    """Return True if the token is accepted by OWUI (quick validation call)."""
-    try:
-        temp = owui_client.with_token(token)
-        resp = temp.session.get(f"{owui_client.base_url}/api/v1/auths/", timeout=5)
-        return resp.status_code == 200
-    except Exception:
-        return False
-
-
 def provision_user(
     username: str,
     tenant_id: str,
     owui_client: OpenWebUIClient,
+    force: bool = False,
 ) -> Optional[Dict[str, str]]:
     """Provision a non-admin OpenWebUI user.
 
@@ -84,6 +75,11 @@ def provision_user(
     - chat_id: last active chat for this user (None on first request or after
       token expiry); caller should use this to resume the conversation.
     - is_new_session: True when re-auth occurred; caller must start a new chat.
+
+    The cached token is trusted while unexpired (no upfront validation
+    round-trip — that round-trip used to be paid on every request). If the
+    token is actually stale, the downstream OWUI call returns 401 and the
+    caller re-invokes with ``force=True`` to re-authenticate and retry once.
     """
     email = _generate_email(username, tenant_id)
     password = _generate_password(email)
@@ -92,22 +88,20 @@ def provision_user(
     with _cache_lock:
         cache = _load_cache()
         entry = cache.get(email)
-        if entry and time.time() < entry["expires_at"]:
-            token_ok = _ping_token(owui_client, entry["token"])
-            if token_ok:
-                logger.info("Reusing cached token for %s (expires in %.0fs)",
-                            email, entry["expires_at"] - time.time())
-                return {
-                    "user_id": entry["user_id"],
-                    "email": email,
-                    "token": entry["token"],
-                    "chat_id": entry.get("chat_id"),
-                    "is_new_session": False,
-                }
-            logger.info("Cached token for %s is rejected by OWUI — re-authenticating", email)
-            entry = None  # force re-auth below
+        if entry and not force and time.time() < entry["expires_at"]:
+            logger.info("Reusing cached token for %s (expires in %.0fs)",
+                        email, entry["expires_at"] - time.time())
+            return {
+                "user_id": entry["user_id"],
+                "email": email,
+                "token": entry["token"],
+                "chat_id": entry.get("chat_id"),
+                "is_new_session": False,
+            }
 
-        if entry:
+        if entry and force:
+            logger.info("Forced re-authentication for %s (token rejected by OWUI)", email)
+        elif entry:
             logger.info("Cached token for %s expired — re-authenticating", email)
 
         try:
