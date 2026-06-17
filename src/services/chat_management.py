@@ -185,11 +185,18 @@ def continue_chat(
         model = assistant_id
         tool_ids = (tenant_config or {}).get("tool_ids")
 
-        if timing is not None:
-            with timing.phase("persist_ms"):
+        try:
+            if timing is not None:
+                with timing.phase("persist_ms"):
+                    current_chat = c.get_chat(chat_id)
+            else:
                 current_chat = c.get_chat(chat_id)
-        else:
-            current_chat = c.get_chat(chat_id)
+        except AuthExpiredError:
+            # OWUI returns 401 for chats that don't exist or that the user can't
+            # access — indistinguishable from an expired token at the HTTP level.
+            # Return None so the caller falls back to creating a new chat.
+            logger.warning("Chat %s not accessible (OWUI 401) — falling back to new chat", chat_id)
+            return None
         current_inner = c._chat_inner(current_chat)
         current_history = current_inner.get("history", {}) or {}
         history_messages = current_history.get("messages", {}) or {}
