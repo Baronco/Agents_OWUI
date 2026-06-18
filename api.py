@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import threading
 
+from src.config import OPENWEBUI_BASE_URL
 from src.services.tenant_routing import resolve_assistant, resolve_tenant_config
 from src.services.user_provisioning import provision_user, get_owui_chat_id, store_chat_mapping
 from src.services.chat_management import get_or_create_chat, continue_chat, run_formatter, text_fallback
@@ -16,7 +17,7 @@ from src.utils.logger import logger
 from src.utils.timing import RequestTiming
 
 app = FastAPI()
-client = OpenWebUIClient()
+client = OpenWebUIClient(base_url=OPENWEBUI_BASE_URL)
 _user_locks: dict = {}
 _user_locks_lock = threading.Lock()
 
