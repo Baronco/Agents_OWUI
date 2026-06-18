@@ -10,7 +10,7 @@ import threading
 
 from src.services.tenant_routing import resolve_assistant, resolve_tenant_config
 from src.services.user_provisioning import provision_user, get_owui_chat_id, store_chat_mapping
-from src.services.chat_management import get_or_create_chat, continue_chat
+from src.services.chat_management import get_or_create_chat, continue_chat, run_formatter, text_fallback
 from src.client.openwebui_client import AuthExpiredError, OpenWebUIClient
 from src.utils.logger import logger
 from src.utils.timing import RequestTiming
@@ -37,7 +37,7 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    assistant_response: str
+    assistant_response: dict
     chat_id: str
     user_id: str
     assistant_id: str
@@ -106,15 +106,21 @@ async def proxy_chat(request: ChatRequest):
     if not chat:
         raise HTTPException(status_code=500, detail="Chat creation failed")
 
-    assistant_response = chat.get("assistant_response", "")
-    if not assistant_response:
+    sales_text = chat.get("assistant_response", "")
+    if not sales_text:
         logger.warning("Returning empty assistant_response for chat %s", chat["chat_id"])
+
+    # Second pass: hand the sales agent's text to the global formatter agent,
+    # which structures it for WhatsApp. Degrade to a plain text object on failure.
+    structured = run_formatter(sales_text, user_info["user_id"], per_user_client, timing)
+    if structured is None:
+        structured = text_fallback(sales_text)
 
     timing.round_trips = per_user_client.round_trips
     timing.emit(chat_id=chat["chat_id"], user_id=user_info["user_id"])
 
     return ChatResponse(
-        assistant_response=assistant_response,
+        assistant_response=structured,
         chat_id=chat["chat_id"],
         user_id=user_info["user_id"],
         assistant_id=assistant_id,
