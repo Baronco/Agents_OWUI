@@ -119,7 +119,7 @@ def get_or_create_chat(
     """Start a new chat. OWUI creates+links it, runs tools, and persists."""
     c = owui_client
     try:
-        now_ms = int(time.time() * 1000)
+        now_s = int(time.time())
         user_msg_id = str(uuid.uuid4())
         assistant_msg_id = str(uuid.uuid4())
         model = (tenant_config or {}).get("model", assistant_id)
@@ -132,7 +132,7 @@ def get_or_create_chat(
             "childrenIds": [],
             "role": "user",
             "content": message_content,
-            "timestamp": now_ms,
+            "timestamp": now_s,
             "models": [model],
         }
 
@@ -185,7 +185,7 @@ def continue_chat(
     """Continue an existing chat. OWUI appends+links, runs tools, and persists."""
     c = owui_client
     try:
-        now_ms = int(time.time() * 1000)
+        now_s = int(time.time())
         new_user_msg_id = str(uuid.uuid4())
         assistant_msg_id = str(uuid.uuid4())
         model = assistant_id
@@ -220,7 +220,7 @@ def continue_chat(
             "childrenIds": [],
             "role": "user",
             "content": message_content,
-            "timestamp": now_ms,
+            "timestamp": now_s,
             "models": [model],
         }
 
