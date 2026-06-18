@@ -469,17 +469,6 @@ def run_formatter(
     if not chat:
         return None
 
-    # Diagnostic: did the formatter actually invoke the tool via the proxy?
-    _out = chat.get("output")
-    _fc_names = (
-        [i.get("name") for i in _out if isinstance(i, dict) and i.get("type") == "function_call"]
-        if isinstance(_out, list) else []
-    )
-    logger.info(
-        "Formatter chat %s — function_calls=%s — content[:160]=%r",
-        chat.get("chat_id"), _fc_names, (chat.get("assistant_response") or "")[:160],
-    )
-
     # Primary path: the formatter invokes format_response as a real tool call.
     structured = extract_tool_result(chat.get("output"), "format_response")
     if structured is None:
