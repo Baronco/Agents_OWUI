@@ -27,3 +27,7 @@ CLAUDE.md
 .specify/
 token_store.json
 open-webui/
+
+# Real tenant data is environment-specific business data, treated like .env
+# (provision manually per environment) — see config/tenants.json.example.
+config/tenants.json
