@@ -29,6 +29,15 @@ from src.utils.timing import RequestTiming
 
 _DETAILS_BLOCK_RE = re.compile(r'<details[^>]*>.*?</details>', re.DOTALL)
 
+# Wraps the sales agent's raw text before handing it to the formatter, so the
+# formatter model can't mistake it for a user message to converse with (it's
+# literal content to format, not a request). Also makes the boundaries of the
+# text explicit, since it may itself contain markdown/code fences.
+_FORMATTER_INPUT_TEMPLATE = (
+    "El mensaje del usuario recibido para formatear usando la herramienta "
+    "disponible es el siguiente:\n```\n{text}\n```"
+)
+
 # Max time to wait for OWUI's async (socket-delivered) completion.
 _RESULT_TIMEOUT_S = 180
 
@@ -76,6 +85,7 @@ def _completion_payload(
     assistant_msg_id: str,
     session_id: Optional[str],
     tool_ids: Optional[list],
+    title_generation_enabled: bool = True,
 ) -> dict:
     payload = {
         "model": model,
@@ -93,7 +103,7 @@ def _completion_payload(
             "memory": False,
         },
         "background_tasks": {
-            "title_generation": bool(parent_id is None and not chat_id),
+            "title_generation": title_generation_enabled and bool(parent_id is None and not chat_id),
             "tags_generation": False,
             "follow_up_generation": False,
         },
@@ -118,11 +128,12 @@ def get_or_create_chat(
     """Start a new chat. OWUI creates+links it, runs tools, and persists."""
     c = owui_client
     try:
-        now_ms = int(time.time() * 1000)
+        now_s = int(time.time())
         user_msg_id = str(uuid.uuid4())
         assistant_msg_id = str(uuid.uuid4())
         model = (tenant_config or {}).get("model", assistant_id)
         tool_ids = (tenant_config or {}).get("tool_ids")
+        title_generation_enabled = (tenant_config or {}).get("title_generation", True)
 
         user_message = {
             "id": user_msg_id,
@@ -130,7 +141,7 @@ def get_or_create_chat(
             "childrenIds": [],
             "role": "user",
             "content": message_content,
-            "timestamp": now_ms,
+            "timestamp": now_s,
             "models": [model],
         }
 
@@ -139,6 +150,7 @@ def get_or_create_chat(
                 model, [{"role": "user", "content": message_content}],
                 chat_id=None, parent_id=None, user_message=user_message,
                 assistant_msg_id=assistant_msg_id, session_id=session_id, tool_ids=tool_ids,
+                title_generation_enabled=title_generation_enabled,
             )
             return c.chat_completion(payload)
 
@@ -182,7 +194,7 @@ def continue_chat(
     """Continue an existing chat. OWUI appends+links, runs tools, and persists."""
     c = owui_client
     try:
-        now_ms = int(time.time() * 1000)
+        now_s = int(time.time())
         new_user_msg_id = str(uuid.uuid4())
         assistant_msg_id = str(uuid.uuid4())
         model = assistant_id
@@ -217,7 +229,7 @@ def continue_chat(
             "childrenIds": [],
             "role": "user",
             "content": message_content,
-            "timestamp": now_ms,
+            "timestamp": now_s,
             "models": [model],
         }
 
@@ -444,12 +456,13 @@ def run_formatter(
     chat per call). Never raises on formatter failure — degrades to None.
     """
     formatter_config = resolve_formatter_config()
+    wrapped_text = _FORMATTER_INPUT_TEMPLATE.format(text=text)
 
     def _create():
         return get_or_create_chat(
             user_id,
             formatter_config["model"],
-            text,
+            wrapped_text,
             tenant_config=formatter_config,
             owui_client=owui_client,
         )
