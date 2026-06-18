@@ -8,6 +8,7 @@ class TenantConfig(TypedDict, total=False):
     model: str
     tool_ids: list[str]
     system_prompt: str
+    title_generation: bool
 
 
 TENANT_CONFIG_MAP: dict[str, TenantConfig] = {
@@ -15,6 +16,11 @@ TENANT_CONFIG_MAP: dict[str, TenantConfig] = {
         "model": "asistente-de-ventas",
         "tool_ids": ["server:0"],
         "system_prompt": "Eres un asistente de ventas amable y servicial. Ayudas a los clientes a encontrar productos y responder preguntas sobre el catálogo.",
+        # Disabled to save the extra LLM call on each new conversation's first
+        # message. Trade-off: OWUI's chat list shows the raw first user
+        # message as the title instead of an AI-generated one (see spec 008
+        # research.md R5 — same fallback that affects the formatter's chat).
+        "title_generation": False,
     },
 }
 
@@ -50,4 +56,8 @@ def resolve_formatter_config() -> TenantConfig:
 
     Independent of TENANT_CONFIG_MAP and of any tenant_id.
     """
-    return {"model": FORMATTER_MODEL, "tool_ids": FORMATTER_TOOL_IDS}
+    # Disable OWUI's title generation: the formatter creates a brand-new chat
+    # on every turn (it's stateless), so unlike the sales agent — where this
+    # only fires once per conversation — it would otherwise fire an extra LLM
+    # call on every single message. The title is never read by anyone.
+    return {"model": FORMATTER_MODEL, "tool_ids": FORMATTER_TOOL_IDS, "title_generation": False}

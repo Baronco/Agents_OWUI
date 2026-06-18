@@ -76,6 +76,7 @@ def _completion_payload(
     assistant_msg_id: str,
     session_id: Optional[str],
     tool_ids: Optional[list],
+    title_generation_enabled: bool = True,
 ) -> dict:
     payload = {
         "model": model,
@@ -93,7 +94,7 @@ def _completion_payload(
             "memory": False,
         },
         "background_tasks": {
-            "title_generation": bool(parent_id is None and not chat_id),
+            "title_generation": title_generation_enabled and bool(parent_id is None and not chat_id),
             "tags_generation": False,
             "follow_up_generation": False,
         },
@@ -123,6 +124,7 @@ def get_or_create_chat(
         assistant_msg_id = str(uuid.uuid4())
         model = (tenant_config or {}).get("model", assistant_id)
         tool_ids = (tenant_config or {}).get("tool_ids")
+        title_generation_enabled = (tenant_config or {}).get("title_generation", True)
 
         user_message = {
             "id": user_msg_id,
@@ -139,6 +141,7 @@ def get_or_create_chat(
                 model, [{"role": "user", "content": message_content}],
                 chat_id=None, parent_id=None, user_message=user_message,
                 assistant_msg_id=assistant_msg_id, session_id=session_id, tool_ids=tool_ids,
+                title_generation_enabled=title_generation_enabled,
             )
             return c.chat_completion(payload)
 

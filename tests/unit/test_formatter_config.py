@@ -16,6 +16,13 @@ def test_returns_constant_config():
     assert cfg["tool_ids"] == FORMATTER_TOOL_IDS
 
 
+def test_title_generation_disabled():
+    # Spec 008: the formatter creates a new chat on every turn, so leaving
+    # title_generation on its default (True) would fire an extra LLM call
+    # per message instead of once per conversation.
+    assert resolve_formatter_config()["title_generation"] is False
+
+
 def test_formatter_model_is_the_agreed_assistant():
     assert FORMATTER_MODEL == "asistente-de-ventas-formateo-respuestas"
     # Must reference the OWUI tool container id (non-empty) so OWUI attaches it.
