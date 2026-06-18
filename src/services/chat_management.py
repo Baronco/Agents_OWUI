@@ -29,6 +29,15 @@ from src.utils.timing import RequestTiming
 
 _DETAILS_BLOCK_RE = re.compile(r'<details[^>]*>.*?</details>', re.DOTALL)
 
+# Wraps the sales agent's raw text before handing it to the formatter, so the
+# formatter model can't mistake it for a user message to converse with (it's
+# literal content to format, not a request). Also makes the boundaries of the
+# text explicit, since it may itself contain markdown/code fences.
+_FORMATTER_INPUT_TEMPLATE = (
+    "El mensaje del usuario recibido para formatear usando la herramienta "
+    "disponible es el siguiente:\n```\n{text}\n```"
+)
+
 # Max time to wait for OWUI's async (socket-delivered) completion.
 _RESULT_TIMEOUT_S = 180
 
@@ -447,12 +456,13 @@ def run_formatter(
     chat per call). Never raises on formatter failure — degrades to None.
     """
     formatter_config = resolve_formatter_config()
+    wrapped_text = _FORMATTER_INPUT_TEMPLATE.format(text=text)
 
     def _create():
         return get_or_create_chat(
             user_id,
             formatter_config["model"],
-            text,
+            wrapped_text,
             tenant_config=formatter_config,
             owui_client=owui_client,
         )
