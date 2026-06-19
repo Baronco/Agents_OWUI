@@ -12,9 +12,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from src.config import BASE_DIR
-
-_DEFAULT_PATH = BASE_DIR / "config" / "tenants.json"
+from src.config import tenants_config_path
 
 
 class ConfigError(Exception):
@@ -57,7 +55,7 @@ def load_config(path: Optional[str] = None) -> dict:
     file is missing, not valid JSON, has a duplicate ``tenant_id``, or any
     entry is missing a required field.
     """
-    file_path = Path(path) if path is not None else _DEFAULT_PATH
+    file_path = Path(path) if path is not None else tenants_config_path()
 
     try:
         with open(file_path, "r", encoding="utf-8") as f:

@@ -1,28 +1,48 @@
 """User provisioning service.
-Provisions non-admin OpenWebUI users and caches their JWT tokens to a local
-JSON file (TOKEN_CACHE_PATH).
+
+Provisions non-admin OpenWebUI users and caches their JWT tokens to disk —
+ONE file per user under ``USERS_DIR`` (spec 011), keyed by
+``(client_phone, tenant_id)``. A request reads/writes only its own user's
+file, so different users never contend (the single-file ``token_store.json``
++ one global lock is gone).
 
 - Token is reused until TOKEN_EXPIRY_SECONDS elapses; then re-auth triggers
   is_new_session=True.
-- Chat session management is handled externally — chat_id is NOT cached here.
+- Per-user access is serialized by a per-user lock here; the same user's
+  concurrent requests are additionally serialized upstream by the proxy's
+  per-(client_phone, tenant_id) request lock (spec 010).
 """
 from typing import Dict, Optional
 import os
+import re
 import json
 import time
 import threading
 import hmac
 import hashlib
+from pathlib import Path
+
 import requests
 
 from src.client.openwebui_client import OpenWebUIClient
+from src.config import users_dir
 from src.utils.logger import logger
 
-_cache_lock = threading.Lock()
+# Per-user locks: different users don't contend; one small guard protects the
+# registry itself (same pattern as api.py's _user_locks).
+_locks: Dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
+
+_SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
 
-def _cache_path() -> str:
-    return os.getenv("TOKEN_CACHE_PATH", "./token_store.json")
+def _user_lock(email: str) -> threading.Lock:
+    with _locks_guard:
+        lock = _locks.get(email)
+        if lock is None:
+            lock = threading.Lock()
+            _locks[email] = lock
+        return lock
 
 
 def _expiry_seconds() -> int:
@@ -32,22 +52,35 @@ def _expiry_seconds() -> int:
         return 3500
 
 
-def _load_cache() -> dict:
-    path = _cache_path()
+def _user_file(email: str) -> Path:
+    """Path to this user's token file: ``USERS_DIR/<sanitized-email>.json``."""
+    return users_dir() / f"{_SAFE.sub('-', email)}.json"
+
+
+def _load_user(email: str) -> dict:
+    """Return this user's cached data, or {} if missing/unreadable.
+
+    A corrupt file affects only this one user (treated as 'not provisioned').
+    """
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(_user_file(email), "r", encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
 
-def _save_cache(data: dict) -> None:
-    path = _cache_path()
+def _save_user(email: str, data: dict) -> None:
+    """Atomically write this user's token file (temp file + os.replace)."""
+    directory = users_dir()
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        os.makedirs(directory, exist_ok=True)
+        path = _user_file(email)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp, path)
     except OSError as e:
-        logger.error("Failed to write token cache to %s: %s", path, e)
+        logger.error("Failed to write token file for %s: %s", email, e)
 
 
 def _generate_email(client_phone: str, tenant_id: str) -> str:
@@ -82,10 +115,9 @@ def provision_user(
     password = _generate_password(email)
     expiry_secs = _expiry_seconds()
 
-    with _cache_lock:
-        cache = _load_cache()
-        entry = cache.get(email)
-        if entry and not force and time.time() < entry["expires_at"]:
+    with _user_lock(email):
+        entry = _load_user(email)
+        if entry and not force and time.time() < entry.get("expires_at", 0):
             logger.info("Reusing cached token for %s (expires in %.0fs)",
                         client_phone, entry["expires_at"] - time.time())
             return {
@@ -117,8 +149,9 @@ def provision_user(
                 return None
 
             expires_at = time.time() + expiry_secs
-            cache[email] = {"user_id": user_id, "token": token, "expires_at": expires_at}
-            _save_cache(cache)
+            # Preserve any existing chat mappings for this user.
+            entry = {**entry, "user_id": user_id, "token": token, "expires_at": expires_at}
+            _save_user(email, entry)
             logger.info("Provisioned and cached token for %s (expires_at=%.0f)", client_phone, expires_at)
             return {"user_id": user_id, "email": email, "token": token, "is_new_session": True}
 
@@ -129,9 +162,8 @@ def provision_user(
 
 def get_owui_chat_id(email: str, external_chat_id: str) -> Optional[str]:
     """Return the OWUI chat_id mapped to the given external chat_id, or None."""
-    with _cache_lock:
-        cache = _load_cache()
-        entry = cache.get(email)
+    with _user_lock(email):
+        entry = _load_user(email)
         if not entry:
             return None
         for mapping in entry.get("chats", []):
@@ -142,15 +174,15 @@ def get_owui_chat_id(email: str, external_chat_id: str) -> Optional[str]:
 
 def store_chat_mapping(email: str, external_chat_id: str, owui_chat_id: str) -> None:
     """Persist the mapping between an external chat_id and the OWUI chat_id."""
-    with _cache_lock:
-        cache = _load_cache()
-        if email not in cache:
+    with _user_lock(email):
+        entry = _load_user(email)
+        if not entry:
             return
-        chats = cache[email].setdefault("chats", [])
+        chats = entry.setdefault("chats", [])
         for mapping in chats:
             if mapping.get("external_chat_id") == external_chat_id:
                 mapping["owui_chat_id"] = owui_chat_id
-                _save_cache(cache)
+                _save_user(email, entry)
                 return
         chats.append({"external_chat_id": external_chat_id, "owui_chat_id": owui_chat_id})
-        _save_cache(cache)
+        _save_user(email, entry)

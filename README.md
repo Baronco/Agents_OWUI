@@ -28,6 +28,45 @@ This repository implements a Python proxy service that mediates between a web pl
         -d '{"username": "alice", "tenant_id": "tenantA", "message": "Hello"}'
    ```
 
+## Docker
+
+The proxy ships with a `Dockerfile` and `docker-compose.yml`. Per-environment
+data (tenant config + per-user tokens) lives on a **persistent named volume**
+mounted at `/data` with two folders — `config/` and `users/` — so it survives
+container recreation and is editable without rebuilding the image. Secrets are
+passed via `.env` (never baked into the image).
+
+```bash
+# 1. Build the image and create the volume
+docker build -t owui-proxy .
+docker volume create owui-proxy-data
+
+# 2. Seed the tenant config onto the volume BEFORE first start.
+#    (The proxy fails fast at startup if config is missing, so it can't be
+#    copied in after a crash.)
+cat config/tenants.json | docker run --rm -i -v owui-proxy-data:/data owui-proxy \
+  sh -c "mkdir -p /data/config /data/users && cat > /data/config/tenants.json"
+
+# 3. Run (compose creates container + volume together)
+docker compose up -d
+```
+
+Notes:
+- **`OPENWEBUI_BASE_URL` inside a container must NOT be `localhost`** (that's
+  the container itself). Use `http://host.docker.internal:3000` or a service
+  name on a shared Docker network.
+- **`.env` values must be UNQUOTED** — `docker --env-file` does not strip
+  quotes (unlike a shell), so quotes would become part of the value. Copy
+  `.env.example` (already unquoted) and fill in real values.
+- **Changing `USER_PASSWORD_SECRET` invalidates all previously provisioned
+  users** (their derived passwords change), so they'd fail to sign in. Set it
+  once and keep it stable.
+- The container runs as a non-root `app` user. The `config/` volume folder is
+  authoritative and must persist; the `users/` folder is a rebuildable token
+  cache (losing it only forces a one-time re-login per client).
+- Token storage is **one JSON file per user** under `users/`, keyed by
+  `(client_phone, tenant_id)` — the same layout locally and in the container.
+
 ## Architecture
 
 - **src/api.py** – FastAPI entry point exposing `POST /proxy/chat`.
