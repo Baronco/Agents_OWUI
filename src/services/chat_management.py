@@ -15,6 +15,7 @@ Tools run on the Open WebUI side. The proxy replicates the OWUI frontend:
 See specs/005-reduce-api-latency/research.md (Finding 3) and src/client/owui_socket.py.
 """
 from typing import Dict, Optional
+from contextlib import nullcontext
 import uuid
 import time
 import re
@@ -201,10 +202,10 @@ def continue_chat(
         tool_ids = (tenant_config or {}).get("tool_ids")
 
         try:
-            if timing is not None:
-                with timing.phase("persist_ms"):
-                    current_chat = c.get_chat(chat_id)
-            else:
+            # Single get_chat call, timed only when a RequestTiming is provided
+            # (nullcontext keeps the un-timed path behavior-identical).
+            persist_phase = timing.phase("persist_ms") if timing is not None else nullcontext()
+            with persist_phase:
                 current_chat = c.get_chat(chat_id)
         except AuthExpiredError:
             # OWUI returns 401 for chats that don't exist or that the user can't
@@ -408,22 +409,6 @@ def normalize_structured(d: dict) -> Optional[Dict]:
         "listButtonText": list_button_text,
         "quote": _to_json_string(d.get("quote", "")),
     }
-
-
-def _extract_from_persisted_chat(full: dict) -> Optional[Dict]:
-    """Fallback: parse the persisted chat's current message ``output``.
-
-    The persisted chat always carries the ``function_call_output`` even when the
-    socket ``done`` event didn't include the full ``output`` array.
-    """
-    inner = full.get("chat", full) if isinstance(full, dict) else {}
-    history = (inner or {}).get("history", {}) or {}
-    messages = history.get("messages", {}) or {}
-    current_id = history.get("currentId") or history.get("current_id")
-    msg = messages.get(current_id) if current_id else None
-    if not isinstance(msg, dict):
-        return None
-    return extract_tool_result(msg.get("output"), "format_response")
 
 
 def text_fallback(body: str) -> Dict:

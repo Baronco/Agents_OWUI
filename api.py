@@ -48,11 +48,9 @@ class ChatResponse(BaseModel):
 
 
 @app.post("/proxy/chat", response_model=ChatResponse)
-async def proxy_chat(request: ChatRequest):
+def proxy_chat(request: ChatRequest):
     timing = RequestTiming()
-    lock = _get_user_lock(request.client_phone, request.tenant_id)
-    with lock:
-        logger.info("Received proxy chat request for client %s tenant %s", request.client_phone, request.tenant_id)
+    logger.info("Received proxy chat request for client %s tenant %s", request.client_phone, request.tenant_id)
 
     assistant_id = resolve_assistant(request.tenant_id)
     if not assistant_id:
@@ -90,19 +88,27 @@ async def proxy_chat(request: ChatRequest):
                 store_chat_mapping(info["email"], request.chat_id, chat["chat_id"])
         return per_user_client, chat
 
-    user_info = _provision()
-    if not user_info:
-        raise HTTPException(status_code=500, detail="User provisioning failed")
-
-    try:
-        per_user_client, chat = _run_chat(user_info)
-    except AuthExpiredError:
-        # Cached token was stale: re-authenticate once and retry (transparent to caller).
-        logger.info("OWUI token rejected mid-request — re-authenticating and retrying once")
-        user_info = _provision(force=True)
+    # Serialize the full provisioning-and-chat-creation flow for the same
+    # client so two near-simultaneous messages can't race into duplicate chat
+    # creation or duplicate provisioning. Different (client_phone, tenant_id)
+    # pairs get different locks, so unrelated clients never block each other.
+    # run_formatter() is intentionally OUTSIDE this lock: it's stateless and
+    # creates a throwaway chat per call, so it has nothing to race on.
+    lock = _get_user_lock(request.client_phone, request.tenant_id)
+    with lock:
+        user_info = _provision()
         if not user_info:
             raise HTTPException(status_code=500, detail="User provisioning failed")
-        per_user_client, chat = _run_chat(user_info)
+
+        try:
+            per_user_client, chat = _run_chat(user_info)
+        except AuthExpiredError:
+            # Cached token was stale: re-authenticate once and retry (transparent to caller).
+            logger.info("OWUI token rejected mid-request — re-authenticating and retrying once")
+            user_info = _provision(force=True)
+            if not user_info:
+                raise HTTPException(status_code=500, detail="User provisioning failed")
+            per_user_client, chat = _run_chat(user_info)
 
     if not chat:
         raise HTTPException(status_code=500, detail="Chat creation failed")

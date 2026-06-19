@@ -35,9 +35,6 @@ class RequestTiming:
         finally:
             self._phases[name] = self._phases.get(name, 0.0) + (time.monotonic() - start) * 1000.0
 
-    def add_round_trips(self, n: int = 1) -> None:
-        self.round_trips += n
-
     def emit(self, **extra: object) -> Dict[str, object]:
         """Log one structured timing line and return the breakdown dict."""
         total_ms = int((time.monotonic() - self._start) * 1000.0)

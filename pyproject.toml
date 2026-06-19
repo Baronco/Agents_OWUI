@@ -15,4 +15,5 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "httpx>=0.27",  # required by fastapi.testclient.TestClient (concurrency tests)
 ]

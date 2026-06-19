@@ -1,6 +1,6 @@
 """Diagnose the OWUI socket.io websocket connection in isolation.
 
-Run:  python diag_socket.py
+Run:  python scripts/diag_socket.py
 Paste the full output. This goes under engine.io and uses websocket-client
 directly so we see the REAL handshake error (status code / reason).
 """
