@@ -38,6 +38,21 @@ This repository implements a Python proxy service that mediates between a web pl
 - **src/models/** – Light‑weight dataclasses representing core entities.
 - **src/persistence/** – SQLite fallback for message persistence (currently a stub).
 - **src/utils/logger.py** – Centralised logger.
+- **scripts/** – Manual debugging/diagnostic tools (e.g. `diag_socket.py`), NOT part of the running application — never imported by `api.py`/`src/`.
+
+## Concurrency
+
+`proxy_chat` is intentionally a **synchronous** (`def`, not `async def`) endpoint.
+Every call it makes is blocking I/O (HTTP via `requests`, a socket.io connect, a
+`threading.Event.wait` of up to 180s) with no `await`, so declaring it `async`
+would run it on the single event loop and **block the entire server for each
+request's full duration** — different clients/tenants could not be served at the
+same time. As a plain `def`, Starlette dispatches it to its thread pool, so
+independent clients run concurrently. **Do not re-add `async`** to this handler
+without first making the whole call chain genuinely async. Requests sharing the
+same `(client_phone, tenant_id)` are serialized through an in-process lock so
+two near-simultaneous messages from one client can't race into duplicate chat
+creation. See `specs/010-performance-efficiency-audit/`.
 
 ## Performance: native function calling
 

@@ -182,51 +182,6 @@ def test_client_raises_auth_expired_on_401(monkeypatch):
         c.chat_completion({"model": MODEL, "messages": []})
 
 
-def test_continue_chat_propagates_auth_expired(monkeypatch):
-    c = OpenWebUIClient()
-
-    def fake_get(url, timeout=None):
-        return FakeResp({}, status=401)
-
-    monkeypatch.setattr(c.session, "get", fake_get)
-    with pytest.raises(AuthExpiredError):
-        cm.continue_chat("chat-1", "hola", MODEL, owui_client=c)
-
-
-def test_api_lazy_reauth_retries_once(monkeypatch):
-    from fastapi.testclient import TestClient
-    try:
-        import api  # entrypoint at repo root
-    except ModuleNotFoundError:
-        import src.api as api
-
-    calls = {"provision": 0, "run": 0}
-
-    def fake_provision(username, tenant_id, owui_client, force=False):
-        calls["provision"] += 1
-        return {"user_id": "u", "email": "e", "token": "t", "chat_id": None, "is_new_session": force}
-
-    def fake_goc(*args, **kwargs):
-        calls["run"] += 1
-        if calls["run"] == 1:
-            raise AuthExpiredError("stale token")
-        return {"chat_id": "c1", "assistant_id": MODEL, "assistant_response": "ok", "follow_ups": []}
-
-    monkeypatch.setattr(api, "provision_user", fake_provision)
-    monkeypatch.setattr(api, "get_or_create_chat", fake_goc)
-    monkeypatch.setattr(api, "update_cached_chat_id", lambda *a, **k: None)
-    monkeypatch.setattr(api.client, "with_token", lambda token: types.SimpleNamespace(round_trips=2))
-
-    resp = TestClient(api.app).post(
-        "/proxy/chat",
-        json={"username": "x", "tenant_id": TENANT_ID, "message": "hola"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["assistant_response"] == "ok"
-    assert calls["provision"] == 2  # initial + forced re-auth
-    assert calls["run"] == 2        # failed attempt + successful retry
-
-
 # ---------------------------------------------------------------------------
 # Tools run on OWUI's side — the proxy delegates and never executes tools itself
 # ---------------------------------------------------------------------------

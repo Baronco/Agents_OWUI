@@ -1,10 +1,9 @@
 """Contract test (spec 007, US1): assistant_response is a structured object.
 
-Runs offline by monkeypatching the proxy's collaborators and calling the async
-endpoint directly (no live OWUI, no HTTP client needed).
+Runs offline by monkeypatching the proxy's collaborators and calling the
+endpoint function directly (no live OWUI, no HTTP client needed). The handler
+is a plain ``def`` (spec 010, US1), so it's called synchronously.
 """
-import asyncio
-
 import api as proxy_api
 
 _FIELDS = ("messageType", "body", "escalate", "buttons", "listSections", "listButtonText", "quote")
@@ -39,7 +38,7 @@ def test_assistant_response_is_structured_object(monkeypatch):
         chat_id="x",
         message="hola",
     )
-    resp = asyncio.run(proxy_api.proxy_chat(req))
+    resp = proxy_api.proxy_chat(req)
 
     assert isinstance(resp.assistant_response, dict)
     for f in _FIELDS:
@@ -55,7 +54,7 @@ def test_fallback_to_text_when_formatter_returns_none(monkeypatch):
         chat_id="x",
         message="hola",
     )
-    resp = asyncio.run(proxy_api.proxy_chat(req))
+    resp = proxy_api.proxy_chat(req)
 
     assert isinstance(resp.assistant_response, dict)
     assert resp.assistant_response["messageType"] == "text"
