@@ -179,8 +179,10 @@ class TestChatFlow:
         fetch_resp = requests.get(f"{BASE_URL}/api/v1/chats/{chat_id}", headers=self.headers)
         assert fetch_resp.status_code == 200
         final_chat = fetch_resp.json()
-        assert len(final_chat.get("messages", [])) >= 2, "Expected at least 2 messages"
-        roles = [m.get("role") for m in final_chat["messages"]]
+        inner = final_chat.get("chat", final_chat)
+        history_msgs = list((inner.get("history", {}) or {}).get("messages", {}).values())
+        assert len(history_msgs) >= 2, "Expected at least 2 messages"
+        roles = [m.get("role") for m in history_msgs]
         assert "user" in roles, "User message not found"
         assert "assistant" in roles, "Assistant message not found"
 
@@ -297,7 +299,8 @@ class TestChatFlow:
         final_resp = requests.get(f"{BASE_URL}/api/v1/chats/{chat_id}", headers=self.headers)
         assert final_resp.status_code == 200
         final_chat = final_resp.json()
-        messages = final_chat.get("messages", [])
+        inner = final_chat.get("chat", final_chat)
+        messages = list((inner.get("history", {}) or {}).get("messages", {}).values())
         assert len(messages) >= 4, f"Expected at least 4 messages (2 exchanges), got {len(messages)}"
         roles = [m.get("role") for m in messages]
         assert roles.count("user") >= 2, "Expected at least 2 user messages"

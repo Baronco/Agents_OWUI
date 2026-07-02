@@ -26,6 +26,26 @@ _SOCKET_PATH = "/ws/socket.io"
 _CONNECT_TIMEOUT_S = 10
 
 
+def _extract_text_from_output(output_items) -> str:
+    """Extract assistant text from OWUI 0.10.2 output array.
+
+    In 0.10.2 the chat:completion done event carries an ``output`` list instead
+    of a plain ``content`` string.  The assistant text lives in the last item
+    with ``type == "message"`` and ``role == "assistant"``, inside its
+    ``content`` array as an ``output_text`` part.
+    """
+    if not isinstance(output_items, list):
+        return ""
+    for item in reversed(output_items):
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "message" and item.get("role") == "assistant":
+            for part in reversed(item.get("content") or []):
+                if isinstance(part, dict) and isinstance(part.get("text"), str) and part["text"]:
+                    return part["text"]
+    return ""
+
+
 def _ipv4(base_url: str) -> str:
     """Force IPv4 for localhost.
 
@@ -53,6 +73,7 @@ def _make_client(assistant_msg_id: str, state: "_CompletionState") -> socketio.C
         try:
             if not isinstance(ev, dict) or ev.get("message_id") != assistant_msg_id:
                 return
+            logger.debug("socket event: %s", ev)
             inner = ev.get("data") or {}
             etype = inner.get("type")
             data = inner.get("data") or {}
@@ -70,6 +91,8 @@ def _make_client(assistant_msg_id: str, state: "_CompletionState") -> socketio.C
                 if data.get("output") is not None:
                     state.output = data["output"]
                 if data.get("done"):
+                    if not state.content and data.get("output") is not None:
+                        state.content = _extract_text_from_output(data["output"])
                     state.done.set()
             elif etype in ("message", "chat:message:delta"):
                 state.content += data.get("content", "") or ""
