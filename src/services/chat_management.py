@@ -48,6 +48,25 @@ def _strip_details_blocks(content: str) -> str:
     return _DETAILS_BLOCK_RE.sub('', content).strip()
 
 
+def _rest_content_fallback(c: OpenWebUIClient, chat_id: str) -> str:
+    """Fetch the last assistant message via REST when the socket delivered no content.
+
+    Reuses the existing get_chat + _walk_history_chain path already used by
+    continue_chat. Raises on HTTP/network errors so callers can log and degrade.
+    """
+    fallback_chat = c.get_chat(chat_id)
+    fallback_inner = c._chat_inner(fallback_chat)
+    fallback_history = fallback_inner.get("history", {}) or {}
+    fallback_messages = fallback_history.get("messages", {}) or {}
+    tip_id = fallback_history.get("currentId") or fallback_history.get("current_id")
+    if tip_id:
+        chain = _walk_history_chain(fallback_messages, tip_id)
+        assistant_msgs = [m["content"] for m in chain if m["role"] == "assistant" and m["content"]]
+        if assistant_msgs:
+            return assistant_msgs[-1]
+    return ""
+
+
 def _bearer(c: OpenWebUIClient) -> str:
     h = c.session.headers.get("Authorization", "") or ""
     return h[len("Bearer "):] if h.startswith("Bearer ") else h
@@ -168,6 +187,15 @@ def get_or_create_chat(
             logger.error("OWUI completion did not return a chat_id")
             return None
 
+        if not content:
+            logger.warning("socket returned empty content for chat %s — trying REST fallback", chat_id)
+            try:
+                content = _rest_content_fallback(c, chat_id)
+            except Exception as exc:
+                logger.error("REST fallback for chat %s failed: %s", chat_id, exc)
+            if not content:
+                logger.error("socket and REST fallback both returned no content for chat %s", chat_id)
+
         logger.info("Created chat %s for user %s", chat_id, user_id)
         return {
             "chat_id": chat_id,
@@ -250,6 +278,15 @@ def continue_chat(
                 _chat_id, content, output = run()
         else:
             _chat_id, content, output = run()
+
+        if not content:
+            logger.warning("socket returned empty content for chat %s — trying REST fallback", chat_id)
+            try:
+                content = _rest_content_fallback(c, chat_id)
+            except Exception as exc:
+                logger.error("REST fallback for chat %s failed: %s", chat_id, exc)
+            if not content:
+                logger.error("socket and REST fallback both returned no content for chat %s", chat_id)
 
         return {
             "chat_id": chat_id,
