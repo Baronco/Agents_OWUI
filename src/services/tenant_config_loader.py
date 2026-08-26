@@ -1,6 +1,10 @@
-"""Loads and validates the tenant/formatter configuration from a JSON file
+"""Loads and validates the tenant configuration from a JSON file
 (``config/tenants.json`` by default), replacing the Python-source constants
 used before spec 009.
+
+Since spec 014 the schema contains only the tenant list: the former global
+``formatter`` section is no longer required, and a legacy one is ignored with
+a logged warning (never an error).
 
 Read once, at import time of ``tenant_routing.py`` — see that module and
 ``specs/009-config-externalization/research.md`` (R3) for why. Any
@@ -13,6 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.config import tenants_config_path
+from src.utils.logger import logger
 
 
 class ConfigError(Exception):
@@ -31,29 +36,14 @@ def _tenant_entry(raw: dict, label: str, file_path: Path) -> dict:
     }
 
 
-def _formatter_entry(raw: dict, file_path: Path) -> dict:
-    if "model" not in raw:
-        raise ConfigError(f"{file_path}: 'formatter' section is missing the required field 'model'.")
-    tool_ids = raw.get("tool_ids", [])
-    if not tool_ids:
-        raise ConfigError(
-            f"{file_path}: 'formatter' section requires a non-empty 'tool_ids' list "
-            "(the formatter is useless without its tool)."
-        )
-    return {
-        "model": raw["model"],
-        "tool_ids": tool_ids,
-        "title_generation": raw.get("title_generation", False),
-    }
-
-
 def load_config(path: Optional[str] = None) -> dict:
-    """Load, parse, and validate the tenant/formatter config file.
+    """Load, parse, and validate the tenant config file.
 
-    Returns ``{"tenants": {tenant_id: TenantConfig}, "formatter": TenantConfig}``.
-    Raises ``ConfigError`` naming the file and the specific problem if the
-    file is missing, not valid JSON, has a duplicate ``tenant_id``, or any
-    entry is missing a required field.
+    Returns ``{"tenants": {tenant_id: TenantConfig}}``. Raises ``ConfigError``
+    naming the file and the specific problem if the file is missing, not
+    valid JSON, has a duplicate ``tenant_id``, or any entry is missing a
+    required field. A legacy top-level ``formatter`` section is ignored with
+    a warning (spec 014).
     """
     file_path = Path(path) if path is not None else tenants_config_path()
 
@@ -68,8 +58,12 @@ def load_config(path: Optional[str] = None) -> dict:
     except json.JSONDecodeError as exc:
         raise ConfigError(f"{file_path}: invalid JSON ({exc}).") from exc
 
-    if "formatter" not in data:
-        raise ConfigError(f"{file_path}: missing required top-level 'formatter' section.")
+    if "formatter" in data:
+        logger.warning(
+            "%s: legacy 'formatter' section ignored — the formatter assistant "
+            "pass was removed (spec 014); delete it from the config file",
+            file_path,
+        )
 
     tenants: dict = {}
     for index, entry in enumerate(data.get("tenants", [])):
@@ -82,5 +76,4 @@ def load_config(path: Optional[str] = None) -> dict:
             raise ConfigError(f"{file_path}: duplicate tenant_id '{tenant_id}'.")
         tenants[tenant_id] = _tenant_entry(entry, label=f"'{tenant_id}'", file_path=file_path)
 
-    formatter = _formatter_entry(data["formatter"], file_path=file_path)
-    return {"tenants": tenants, "formatter": formatter}
+    return {"tenants": tenants}

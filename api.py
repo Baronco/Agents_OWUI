@@ -11,7 +11,7 @@ import threading
 from src.config import OPENWEBUI_BASE_URL
 from src.services.tenant_routing import resolve_assistant, resolve_tenant_config
 from src.services.user_provisioning import provision_user, get_owui_chat_id, store_chat_mapping
-from src.services.chat_management import get_or_create_chat, continue_chat, run_formatter, text_fallback
+from src.services.chat_management import continue_chat, get_or_create_chat
 from src.client.openwebui_client import AuthExpiredError, OpenWebUIClient
 from src.utils.logger import logger
 from src.utils.timing import RequestTiming
@@ -38,7 +38,7 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    assistant_response: dict
+    assistant_response: str
     chat_id: str
     user_id: str
     assistant_id: str
@@ -92,8 +92,6 @@ def proxy_chat(request: ChatRequest):
     # client so two near-simultaneous messages can't race into duplicate chat
     # creation or duplicate provisioning. Different (client_phone, tenant_id)
     # pairs get different locks, so unrelated clients never block each other.
-    # run_formatter() is intentionally OUTSIDE this lock: it's stateless and
-    # creates a throwaway chat per call, so it has nothing to race on.
     lock = _get_user_lock(request.client_phone, request.tenant_id)
     with lock:
         user_info = _provision()
@@ -117,17 +115,11 @@ def proxy_chat(request: ChatRequest):
     if not sales_text:
         logger.warning("Returning empty assistant_response for chat %s", chat["chat_id"])
 
-    # Second pass: hand the sales agent's text to the global formatter agent,
-    # which structures it for WhatsApp. Degrade to a plain text object on failure.
-    structured = run_formatter(sales_text, user_info["user_id"], per_user_client, timing)
-    if structured is None:
-        structured = text_fallback(sales_text)
-
     timing.round_trips = per_user_client.round_trips
     timing.emit(chat_id=chat["chat_id"], user_id=user_info["user_id"])
 
     return ChatResponse(
-        assistant_response=structured,
+        assistant_response=sales_text,
         chat_id=chat["chat_id"],
         user_id=user_info["user_id"],
         assistant_id=assistant_id,

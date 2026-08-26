@@ -14,7 +14,7 @@ OPENWEBUI_BASE_URL = get_env("OPENWEBUI_BASE_URL", "http://localhost:3000")
 
 
 def tenants_config_path() -> Path:
-    """Path to the tenant/formatter config file.
+    """Path to the tenant config file.
 
     Env-configurable (``TENANTS_CONFIG_PATH``) so the file can live on a
     mounted volume in Docker; defaults to ``<repo>/config/tenants.json`` for

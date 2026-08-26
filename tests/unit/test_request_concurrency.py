@@ -41,13 +41,6 @@ def _patch_collaborators(monkeypatch, get_or_create):
     monkeypatch.setattr(proxy_api, "get_owui_chat_id", lambda *a, **k: None)
     monkeypatch.setattr(proxy_api, "store_chat_mapping", lambda *a, **k: None)
     monkeypatch.setattr(proxy_api, "get_or_create_chat", get_or_create)
-    monkeypatch.setattr(
-        proxy_api, "run_formatter",
-        lambda *a, **k: {
-            "messageType": "text", "body": "hola", "escalate": False,
-            "buttons": "", "listSections": "", "listButtonText": "", "quote": "",
-        },
-    )
 
 
 def _post(client, phone, tenant="a0000001-0000-4000-8000-000000000001", chat_id="x"):

@@ -6,10 +6,5 @@
       "tool_ids": ["server:0"],
       "title_generation": false
     }
-  ],
-  "formatter": {
-    "model": "asistente-de-ventas-formateo-respuestas",
-    "tool_ids": ["format_reponse"],
-    "title_generation": false
-  }
+  ]
 }

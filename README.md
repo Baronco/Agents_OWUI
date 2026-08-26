@@ -19,13 +19,13 @@ This repository implements a Python proxy service that mediates between a web pl
    `specs/009-config-externalization/contracts/tenants-config-schema.md`.
 4. Run the API server:
    ```bash
-   uvicorn src. --host 0.0.0.0 --port 8000
+   uvicorn api:app --host 0.0.0.0 --port 8000
    ```
 5. Send a request to the proxy endpoint:
    ```bash
    curl -X POST http://localhost:8000/proxy/chat \
         -H "Content-Type: application/json" \
-        -d '{"username": "alice", "tenant_id": "tenantA", "message": "Hello"}'
+        -d '{"tenant_id": "tenantA", "client_phone": "+573001234567", "chat_id": "demo-1", "message": "Hello"}'
    ```
 
 ## Docker
@@ -69,11 +69,11 @@ Notes:
 
 ## Architecture
 
-- **src/api.py** – FastAPI entry point exposing `POST /proxy/chat`.
+- **api.py** – FastAPI entry point exposing `POST /proxy/chat`. Each request is answered with a single assistant call (the tenant's sales assistant); the response's `assistant_response` is that assistant's plain-text answer.
 - **src/client/** – Wrapper around OpenWebUI REST endpoints and payload builder.
 - **src/services/** – Business logic for tenant routing, user provisioning, and chat management.
-- **src/services/tenant_config_loader.py** – Loads and validates `config/tenants.json` (tenant list + the global formatter config) on every call (no caching, no restart needed to pick up changes); fails fast with a clear error on a missing/malformed file, both at startup and on the next request if it breaks later.
-- **config/tenants.json** – Tenant‑to‑assistant mapping and the global formatter config. **Not committed** (gitignored, like `.env` — business data, not source code); copy `config/tenants.json.example` to get started. Edit this file (no Python changes needed) to add/change a tenant or rename an assistant — see `specs/009-config-externalization/contracts/tenants-config-schema.md` for the schema.
+- **src/services/tenant_config_loader.py** – Loads and validates `config/tenants.json` (tenant list) on every call (no caching, no restart needed to pick up changes); fails fast with a clear error on a missing/malformed file, both at startup and on the next request if it breaks later.
+- **config/tenants.json** – Tenant‑to‑assistant mapping. **Not committed** (gitignored, like `.env` — business data, not source code); copy `config/tenants.json.example` to get started. Edit this file (no Python changes needed) to add/change a tenant or rename an assistant — see `specs/014-remove-formatter-pass/contracts/tenants-config-schema.md` for the schema.
 - **src/models/** – Light‑weight dataclasses representing core entities.
 - **src/persistence/** – SQLite fallback for message persistence (currently a stub).
 - **src/utils/logger.py** – Centralised logger.

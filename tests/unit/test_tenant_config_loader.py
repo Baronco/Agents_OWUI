@@ -1,4 +1,9 @@
-"""Unit tests for the JSON-backed tenant/formatter config loader (spec 009, US2/US3)."""
+"""Unit tests for the JSON-backed tenant config loader (spec 009, US2/US3; spec 014, US2).
+
+Since spec 014 the schema contains only the tenant list: a top-level
+``formatter`` section is no longer required, and a legacy one is ignored with
+a logged warning.
+"""
 import json
 
 import pytest
@@ -26,11 +31,6 @@ def _valid_data():
                 "model": "model-2",
             },
         ],
-        "formatter": {
-            "model": "formatter-model",
-            "tool_ids": ["format_reponse"],
-            "title_generation": False,
-        },
     }
 
 
@@ -49,11 +49,37 @@ def test_load_config_happy_path(tmp_path):
         "tool_ids": [],
         "title_generation": True,
     }
-    assert result["formatter"] == {
-        "model": "formatter-model",
-        "tool_ids": ["format_reponse"],
-        "title_generation": False,
-    }
+    # Spec 014: no formatter key in the result
+    assert "formatter" not in result
+
+
+def test_config_without_formatter_section_is_valid(tmp_path):
+    # The happy path above already covers this; explicit case for the spec-014
+    # contract so a regression is named precisely.
+    path = _write(tmp_path, {"tenants": []})
+    result = loader.load_config(path=path)
+
+    assert result == {"tenants": {}}
+
+
+def test_legacy_formatter_section_warns_and_is_ignored(tmp_path, monkeypatch):
+    warnings = []
+
+    class _FakeLogger:
+        def warning(self, msg, *args):
+            warnings.append(msg % args if args else msg)
+
+    monkeypatch.setattr(loader, "logger", _FakeLogger())
+
+    data = _valid_data()
+    data["formatter"] = {"model": "old-formatter", "tool_ids": ["format_reponse"]}
+    path = _write(tmp_path, data)
+
+    result = loader.load_config(path=path)
+
+    assert "formatter" not in result
+    assert result["tenants"]["t1"]["model"] == "model-1"
+    assert any("formatter" in w for w in warnings)
 
 
 # --- US3: fail-fast validation -------------------------------------------------
@@ -67,7 +93,7 @@ def test_missing_file_raises_config_error(tmp_path):
 
 def test_invalid_json_raises_config_error(tmp_path):
     path = tmp_path / "tenants.json"
-    path.write_text('{"tenants": [,], "formatter": {}}', encoding="utf-8")
+    path.write_text('{"tenants": [,]}', encoding="utf-8")
     with pytest.raises(loader.ConfigError) as exc_info:
         loader.load_config(path=str(path))
     message = str(exc_info.value)
@@ -95,20 +121,4 @@ def test_tenant_missing_tenant_id_raises_config_error(tmp_path):
     del data["tenants"][1]["tenant_id"]
     path = _write(tmp_path, data)
     with pytest.raises(loader.ConfigError, match="index 1"):
-        loader.load_config(path=path)
-
-
-def test_missing_formatter_section_raises_config_error(tmp_path):
-    data = _valid_data()
-    del data["formatter"]
-    path = _write(tmp_path, data)
-    with pytest.raises(loader.ConfigError, match="formatter"):
-        loader.load_config(path=path)
-
-
-def test_formatter_with_empty_tool_ids_raises_config_error(tmp_path):
-    data = _valid_data()
-    data["formatter"]["tool_ids"] = []
-    path = _write(tmp_path, data)
-    with pytest.raises(loader.ConfigError, match="tool_ids"):
         loader.load_config(path=path)

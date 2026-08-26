@@ -1,8 +1,8 @@
 """Unit tests for the title_generation override (spec 008).
 
-The formatter always creates a brand-new chat (chat_id=None, parent_id=None),
-so without an explicit override, OWUI's title_generation would fire on every
-turn instead of once per conversation as it does for the sales agent.
+A brand-new sales chat (chat_id=None, parent_id=None) may set
+``title_generation`` per tenant; continued chats never trigger it, so OWUI
+generates the title once per conversation instead of on every turn.
 """
 from src.services.chat_management import _completion_payload
 
