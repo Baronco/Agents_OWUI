@@ -1,0 +1,10 @@
+{
+  "tenants": [
+    {
+      "tenant_id": "REPLACE-WITH-REAL-TENANT-UUID",
+      "model": "REPLACE-WITH-OWUI-ASSISTANT-MODEL-NAME",
+      "tool_ids": ["server:0"],
+      "title_generation": false
+    }
+  ]
+}

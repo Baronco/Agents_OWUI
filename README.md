@@ -1,165 +1,113 @@
-# Open WebUI + Ecommerce Tool Integration
+# OWUI Agent Proxy
 
-Este README describe las 6 herramientas (`tool_ids`) que el agente puede usar contra la API de ecommerce. Cada herramienta documenta la ruta, el método HTTP, los parámetros o el body JSON obligatorio y opcional, y una breve explicación de su propósito.
+This repository implements a Python proxy service that mediates between a web plugin and the OpenWebUI API.
 
-## Requisitos
+## Quickstart
 
-- `OWUI_API_KEY`: token Bearer para Open WebUI
-- `OWUI_BASE_URL`: base URL de Open WebUI (por defecto `http://localhost:3000`)
-- `ECOMMERCE_API_KEY`: token Bearer para la API de ecommerce
-- `ECOMMERCE_BASE_URL`: la URL de la API de ecommerce (`https://api-development-5d8c.up.railway.app`)
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Set required environment variables (example defaults are in `src/config.py`):
+   - `OWUI_API_KEY` – API key for OpenWebUI (if needed)
+   - `OPENWEBUI_BASE_URL` – Base URL of the OpenWebUI instance (default `http://localhost:3000`)
+3. Provision the tenant config (not in git — treated like `.env`, business data not source code):
+   ```bash
+   cp config/tenants.json.example config/tenants.json
+   ```
+   then edit it with the real tenant_id/model/tool_ids — see
+   `specs/009-config-externalization/contracts/tenants-config-schema.md`.
+4. Run the API server:
+   ```bash
+   uvicorn api:app --host 0.0.0.0 --port 8000
+   ```
+5. Send a request to the proxy endpoint:
+   ```bash
+   curl -X POST http://localhost:8000/proxy/chat \
+        -H "Content-Type: application/json" \
+        -d '{"tenant_id": "tenantA", "client_phone": "+573001234567", "chat_id": "demo-1", "message": "Hello"}'
+   ```
 
-## Tool map usados
+## Docker
 
-El agente usa `tool_ids=["server:0"]` en Open WebUI. El `tool_name` que envía el modelo corresponde a las siguientes herramientas:
+The proxy ships with a `Dockerfile` and `docker-compose.yml`. Per-environment
+data (tenant config + per-user tokens) lives on a **persistent named volume**
+mounted at `/data` with two folders — `config/` and `users/` — so it survives
+container recreation and is editable without rebuilding the image. Secrets are
+passed via `.env` (never baked into the image).
 
-| tool_name | API endpoint | Método | Descripción |
-|---|---|---|---|
-| `search_catalog` | `/v1/catalog/search` | POST | Busca productos en catálogo por texto y filtros. |
-| `list_catalog_products` | `/v1/catalog/products` | GET | Lista productos del catálogo con paginación y categoría. |
-| `get_catalog_product` | `/v1/catalog/products/{product_id}` | GET | Obtiene detalles de un producto por su id. |
-| `lookup_catalog_inventory` | `/v1/catalog/inventory-lookup` | POST | Consulta inventario para una lista de productos. |
-| `compare_catalog_products` | `/v1/catalog/comparisons` | POST | Compara varios productos seleccionados. |
-| `suggest_cross_sell_products` | `/v1/catalog/cross-sell-suggestions` | POST | Sugiere productos complementarios para venta cruzada. |
+```bash
+# 1. Build the image and create the volume
+docker build -t owui-proxy .
+docker volume create owui-proxy-data
 
-## Headers comunes
+# 2. Seed the tenant config onto the volume BEFORE first start.
+#    (The proxy fails fast at startup if config is missing, so it can't be
+#    copied in after a crash.)
+cat config/tenants.json | docker run --rm -i -v owui-proxy-data:/data owui-proxy \
+  sh -c "mkdir -p /data/config /data/users && cat > /data/config/tenants.json"
 
-Todos los llamados a la API de ecommerce deben incluir:
-
-```http
-Authorization: Bearer <ECOMMERCE_API_KEY>
-Content-Type: application/json
+# 3. Run (compose creates container + volume together)
+docker compose up -d
 ```
 
----
+Notes:
+- **`OPENWEBUI_BASE_URL` inside a container must NOT be `localhost`** (that's
+  the container itself). Use `http://host.docker.internal:3000` or a service
+  name on a shared Docker network.
+- **`.env` values must be UNQUOTED** — `docker --env-file` does not strip
+  quotes (unlike a shell), so quotes would become part of the value. Copy
+  `.env.example` (already unquoted) and fill in real values.
+- **Changing `USER_PASSWORD_SECRET` invalidates all previously provisioned
+  users** (their derived passwords change), so they'd fail to sign in. Set it
+  once and keep it stable.
+- The container runs as a non-root `app` user. The `config/` volume folder is
+  authoritative and must persist; the `users/` folder is a rebuildable token
+  cache (losing it only forces a one-time re-login per client).
+- Token storage is **one JSON file per user** under `users/`, keyed by
+  `(client_phone, tenant_id)` — the same layout locally and in the container.
 
-## 1. search_catalog
+## Architecture
 
-- Ruta: `POST /v1/catalog/search`
-- Request body: JSON
+- **api.py** – FastAPI entry point exposing `POST /proxy/chat`. Each request is answered with a single assistant call (the tenant's sales assistant); the response's `assistant_response` is that assistant's plain-text answer.
+- **src/client/** – Wrapper around OpenWebUI REST endpoints and payload builder.
+- **src/services/** – Business logic for tenant routing, user provisioning, and chat management.
+- **src/services/tenant_config_loader.py** – Loads and validates `config/tenants.json` (tenant list) on every call (no caching, no restart needed to pick up changes); fails fast with a clear error on a missing/malformed file, both at startup and on the next request if it breaks later.
+- **config/tenants.json** – Tenant‑to‑assistant mapping. **Not committed** (gitignored, like `.env` — business data, not source code); copy `config/tenants.json.example` to get started. Edit this file (no Python changes needed) to add/change a tenant or rename an assistant — see `specs/014-remove-formatter-pass/contracts/tenants-config-schema.md` for the schema.
+- **src/models/** – Light‑weight dataclasses representing core entities.
+- **src/persistence/** – SQLite fallback for message persistence (currently a stub).
+- **src/utils/logger.py** – Centralised logger.
+- **scripts/** – Manual debugging/diagnostic tools (e.g. `diag_socket.py`), NOT part of the running application — never imported by `api.py`/`src/`.
 
-```json
-{
-  "tenant_id": "string",
-  "query": "string",
-  "top_k": 3,
-  "filters": { ... }
-}
-```
+## Concurrency
 
-- `tenant_id` (string, requerido): identificador del tenant.
-- `query` (string, requerido): término de búsqueda libre.
-- `top_k` (integer, opcional): máximo de resultados, entre 1 y 10. Default: 3.
-- `filters` (object|null, opcional): filtros adicionales de catálogo.
+`proxy_chat` is intentionally a **synchronous** (`def`, not `async def`) endpoint.
+Every call it makes is blocking I/O (HTTP via `requests`, a socket.io connect, a
+`threading.Event.wait` of up to 180s) with no `await`, so declaring it `async`
+would run it on the single event loop and **block the entire server for each
+request's full duration** — different clients/tenants could not be served at the
+same time. As a plain `def`, Starlette dispatches it to its thread pool, so
+independent clients run concurrently. **Do not re-add `async`** to this handler
+without first making the whole call chain genuinely async. Requests sharing the
+same `(client_phone, tenant_id)` are serialized through an in-process lock so
+two near-simultaneous messages from one client can't race into duplicate chat
+creation. See `specs/010-performance-efficiency-audit/`.
 
-Breve: busca productos en el catálogo según texto y condiciones adicionales.
+## Performance: native function calling
 
----
+The proxy calls OpenWebUI's `/api/chat/completions` with `params.function_calling: "native"`
+whenever `tool_ids` are configured. This is **required** for latency: without it, OpenWebUI
+runs a prompt-based tool pre-pass — a full extra LLM round-trip on *every* message just to
+decide whether a tool is needed — before generating the actual answer. Native function calling
+passes the tool specs inline so the model decides in a single pass. See
+`specs/005-reduce-api-latency/contracts/owui-completion.md`.
 
-## 2. list_catalog_products
+The proxy also avoids an upfront token-validation round-trip per request: the cached token is
+trusted while unexpired, and a stale token is recovered lazily (a 401 triggers one
+re-authentication + retry). Each request logs a `request_timing` line with a per-phase
+breakdown (`provision_ms`, `completion_ms`, `tool_ms`, `persist_ms`, `total_ms`, `round_trips`).
 
-- Ruta: `GET /v1/catalog/products`
-- Query params:
+## Notes
 
-| Parámetro | Tipo | Requerido | Descripción |
-|---|---|---|---|
-| `tenant_id` | string | sí | Tenant que solicita el catálogo. |
-| `limit` | integer | no | Número máximo de productos. Default: 100. |
-| `offset` | integer | no | Desplazamiento para paginación. Default: 0. |
-| `category` | string/null | no | Filtra por categoría. |
-
-Breve: lista productos del catálogo del tenant con paginación y categoría opcional.
-
----
-
-## 3. get_catalog_product
-
-- Ruta: `GET /v1/catalog/products/{product_id}`
-- Path param:
-  - `product_id` (string, requerido)
-- Query params:
-  - `tenant_id` (string, requerido)
-
-Breve: obtiene la ficha completa de un producto específico.
-
----
-
-## 4. lookup_catalog_inventory
-
-- Ruta: `POST /v1/catalog/inventory-lookup`
-- Request body: JSON
-
-```json
-{
-  "tenant_id": "string",
-  "product_ids": ["string", "string"]
-}
-```
-
-- `tenant_id` (string, requerido)
-- `product_ids` (array[string], requerido): lista de ids de producto, 1 a 20.
-
-Breve: consulta disponibilidad e inventario de los productos pedidos.
-
----
-
-## 5. compare_catalog_products
-
-- Ruta: `POST /v1/catalog/comparisons`
-- Request body: JSON
-
-```json
-{
-  "tenant_id": "string",
-  "product_ids": ["string", "string"]
-}
-```
-
-- `tenant_id` (string, requerido)
-- `product_ids` (array[string], requerido): lista de 2 a 5 ids de producto.
-
-Breve: compara atributos de varios productos para ayudar en la elección.
-
----
-
-## 6. suggest_cross_sell_products
-
-- Ruta: `POST /v1/catalog/cross-sell-suggestions`
-- Request body: JSON
-
-```json
-{
-  "tenant_id": "string",
-  "product_id": "string",
-  "context": { ... }
-}
-```
-
-- `tenant_id` (string, requerido)
-- `product_id` (string, requerido)
-- `context` (object|null, opcional): contexto extra para mejorar sugerencias.
-
-Breve: sugiere productos complementarios para venta cruzada basada en un producto base.
-
----
-
-## Ejemplo de llamada desde el agente
-
-El modelo puede devolver una llamada a herramienta con este formato:
-
-```json
-{
-  "function": {
-    "name": "search_catalog",
-    "arguments": "{\"tenant_id\": \"123\", \"query\": \"audífonos bluetooth\"}"
-  }
-}
-```
-
-El backend debe ejecutar la tool real y luego enviar el resultado al historial como role `tool`.
-
----
-
-## Recomendación
-
-Usa estas 6 herramientas exclusivamente para las consultas de catálogo e inventario, y deja que el agente volteé a Open WebUI para la coordinación de `tool_calls`.
+- User credentials are generated with simple placeholders; integrate a secure password generator and secret storage for real deployments.
+- Message persistence is handled by OpenWebUI; the proxy is stateless and persists chats via the OpenWebUI chat API.

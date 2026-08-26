@@ -1,0 +1,46 @@
+# Keep secrets, per-environment data, and bulky non-runtime files OUT of the
+# build context and image layers (spec 011 FR-003 / SC-006).
+
+# Secrets & per-environment data
+.env
+.env.*
+!.env.example
+config/tenants.json
+users/
+token_store.json
+
+# Virtual env & caches
+.venv
+__pycache__/
+*.py[oc]
+*.egg-info
+build/
+dist/
+wheels/
+
+# Vendored third-party (huge, not part of the proxy)
+open-webui/
+
+# Repo/spec/tooling metadata not needed at runtime
+.git
+.gitignore
+specs/
+.specify/
+.claude/
+.debug/
+CLAUDE.md
+tests/
+*.md
+!README.md
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+*.log
+
+# Docker assets themselves
+Dockerfile
+.dockerignore
+docker-compose.yml
