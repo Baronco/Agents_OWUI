@@ -1,15 +1,15 @@
 """Tenant routing service.
 Maps tenant_id to an assistant configuration including model, tools, and system prompt.
 
-Since spec 009, the tenant list and the global formatter config come from
-``config/tenants.json`` (see ``tenant_config_loader``) instead of living as
-Python constants. By explicit choice, the file is re-read and re-validated
-on every call below (not cached) — adding a tenant takes effect on the very
-next request, with no process restart. The trade-off: each call pays the
-cost of reading + parsing the file (small for a config file this size), and
-a file broken *after* startup surfaces as a failure on the next request that
-needs it, rather than at a fixed "reload" moment. See
-specs/009-config-externalization for the full discussion.
+Since spec 009, the tenant list comes from ``config/tenants.json`` (see
+``tenant_config_loader``) instead of living as Python constants. By explicit
+choice, the file is re-read and re-validated on every call below (not
+cached) — adding a tenant takes effect on the very next request, with no
+process restart. The trade-off: each call pays the cost of reading + parsing
+the file (small for a config file this size), and a file broken *after*
+startup surfaces as a failure on the next request that needs it, rather than
+at a fixed "reload" moment. See specs/009-config-externalization for the full
+discussion.
 """
 from typing import Optional, TypedDict
 
@@ -39,11 +39,3 @@ def resolve_assistant(tenant_id: str) -> Optional[str]:
 def resolve_tenant_config(tenant_id: str) -> Optional[TenantConfig]:
     """Return the full TenantConfig for the given tenant, or None if unknown."""
     return load_config()["tenants"].get(tenant_id)
-
-
-def resolve_formatter_config() -> TenantConfig:
-    """Return the global formatter config — identical for all tenants.
-
-    Independent of the tenant list and of any tenant_id.
-    """
-    return load_config()["formatter"]

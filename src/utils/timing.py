@@ -15,7 +15,7 @@ from typing import Dict, Iterator, Optional
 from src.utils.logger import logger
 
 # Canonical phase keys reported in every breakdown.
-_PHASES = ("provision_ms", "completion_ms", "tool_ms", "persist_ms", "format_ms")
+_PHASES = ("provision_ms", "completion_ms", "tool_ms", "persist_ms")
 
 
 class RequestTiming:

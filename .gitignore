@@ -23,6 +23,9 @@ temp_test.py
 specs/
 .claude/
 .debug/
+.opencode/
+develop_standars/
+AGENTS.md
 CLAUDE.md
 .specify/
 token_store.json
