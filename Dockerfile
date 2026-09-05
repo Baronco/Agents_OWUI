@@ -16,6 +16,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # TEMPLATE (config/tenants.json.example) land in the image.
 COPY api.py ./
 COPY src/ ./src/
+COPY tools/ ./tools/
+COPY utils/ ./utils/
 COPY owui_tools/ ./owui_tools/
 COPY config/ ./config/
 

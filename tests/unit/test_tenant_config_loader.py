@@ -59,7 +59,42 @@ def test_config_without_formatter_section_is_valid(tmp_path):
     path = _write(tmp_path, {"tenants": []})
     result = loader.load_config(path=path)
 
-    assert result == {"tenants": {}}
+    assert result == {"tenants": {}, "default_agent": None}
+
+
+# --- Spec 016: default_agent -------------------------------------------------
+
+
+def test_default_agent_present_is_parsed(tmp_path):
+    data = _valid_data()
+    data["default_agent"] = {
+        "model": "default-model",
+        "tool_ids": ["server:1"],
+        "title_generation": False,
+    }
+    path = _write(tmp_path, data)
+    result = loader.load_config(path=path)
+
+    assert result["default_agent"] == {
+        "model": "default-model",
+        "tool_ids": ["server:1"],
+        "title_generation": False,
+    }
+
+
+def test_default_agent_absent_returns_none(tmp_path):
+    path = _write(tmp_path, _valid_data())
+    result = loader.load_config(path=path)
+
+    assert result["default_agent"] is None
+
+
+def test_default_agent_missing_model_raises_config_error(tmp_path):
+    data = _valid_data()
+    data["default_agent"] = {"tool_ids": ["server:1"]}
+    path = _write(tmp_path, data)
+    with pytest.raises(loader.ConfigError, match="default_agent"):
+        loader.load_config(path=path)
 
 
 def test_legacy_formatter_section_warns_and_is_ignored(tmp_path, monkeypatch):

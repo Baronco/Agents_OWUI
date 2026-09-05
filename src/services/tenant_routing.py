@@ -11,7 +11,8 @@ startup surfaces as a failure on the next request that needs it, rather than
 at a fixed "reload" moment. See specs/009-config-externalization for the full
 discussion.
 """
-from typing import Optional, TypedDict
+
+from typing import TypedDict
 
 from src.services.tenant_config_loader import load_config
 
@@ -28,7 +29,7 @@ class TenantConfig(TypedDict, total=False):
 load_config()
 
 
-def resolve_assistant(tenant_id: str) -> Optional[str]:
+def resolve_assistant(tenant_id: str) -> str | None:
     """Return the assistant model name for the given tenant, or None if unknown."""
     config = load_config()["tenants"].get(tenant_id)
     if config:
@@ -36,6 +37,11 @@ def resolve_assistant(tenant_id: str) -> Optional[str]:
     return None
 
 
-def resolve_tenant_config(tenant_id: str) -> Optional[TenantConfig]:
+def resolve_tenant_config(tenant_id: str) -> TenantConfig | None:
     """Return the full TenantConfig for the given tenant, or None if unknown."""
     return load_config()["tenants"].get(tenant_id)
+
+
+def resolve_default_agent() -> TenantConfig | None:
+    """Return the platform's default agent config, or None if not configured."""
+    return load_config().get("default_agent")
