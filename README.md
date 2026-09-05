@@ -67,9 +67,21 @@ Notes:
 - Token storage is **one JSON file per user** under `users/`, keyed by
   `(client_phone, tenant_id)` — the same layout locally and in the container.
 
+### Markdown / meta-learning endpoint variables (spec 015)
+
+The `POST /learn` endpoint (markdown generator ported from GenFilesMCP) reads these from `.env`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OWUI_URL` | `http://localhost:8080` | Open WebUI base URL used for user-id lookup, upload, and knowledge filing. Point at the **same** instance as `OPENWEBUI_BASE_URL`; inside a container use `http://host.docker.internal:3000`. |
+| `ENABLE_CREATE_KNOWLEDGE` | `true` | Whether the generated file is added to a knowledge collection. |
+| `KNOWLEDGE_COLLECTION_NAME` | `My Generated Files` | Name of the knowledge collection that receives generated files. |
+| `DOWNLOAD_HTML_BUTTON` | `false` | The `/learn` handler forces this to `false`, returning the raw structured result (never the HTML download-page). |
+
 ## Architecture
 
-- **api.py** – FastAPI entry point exposing `POST /proxy/chat`. Each request is answered with a single assistant call (the tenant's sales assistant); the response's `assistant_response` is that assistant's plain-text answer.
+- **api.py** – FastAPI entry point exposing `POST /proxy/chat`. Each request is answered with a single assistant call (the tenant's sales assistant); the response's `assistant_response` is that assistant's plain-text answer. Also exposes `POST /learn` (spec 015), the agent's memory / meta-learning tool: it runs a caller-provided Python script to build a Markdown file, uploads it to Open WebUI, and optionally files it into a knowledge collection.
+- **tools/** and **utils/** – Ported verbatim from the `GenFilesMCP` project to support `POST /learn` (`tools/markdown_tool.py` runs the script and uploads; `tools/shared.py` holds the response helpers relocated from the source's `api/shared.py` because the `api` name is taken by this module; `utils/http/*` talk to Open WebUI). Copied byte-for-byte; do not modify.
 - **src/client/** – Wrapper around OpenWebUI REST endpoints and payload builder.
 - **src/services/** – Business logic for tenant routing, user provisioning, and chat management.
 - **src/services/tenant_config_loader.py** – Loads and validates `config/tenants.json` (tenant list) on every call (no caching, no restart needed to pick up changes); fails fast with a clear error on a missing/malformed file, both at startup and on the next request if it breaks later.
