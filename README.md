@@ -80,12 +80,12 @@ The `POST /learn` endpoint (markdown generator ported from GenFilesMCP) reads th
 
 ## Architecture
 
-- **api.py** – FastAPI entry point exposing `POST /proxy/chat`. Each request is answered with a single assistant call (the tenant's sales assistant); the response's `assistant_response` is that assistant's plain-text answer. Also exposes `POST /learn` (spec 015), the agent's memory / meta-learning tool: it runs a caller-provided Python script to build a Markdown file, uploads it to Open WebUI, and optionally files it into a knowledge collection.
+- **api.py** – FastAPI entry point exposing `POST /proxy/chat` — an agentic sub-agent call authenticated by the caller's bearer token and routed to the platform's **default agent**; the request body is `{message, chat_id?}` and the response is `{assistant_response}`. Also exposes `POST /learn` (spec 015), the agent's memory / meta-learning tool: it runs a caller-provided Python script to build a Markdown file, uploads it to Open WebUI, and optionally files it into a knowledge collection.
 - **tools/** and **utils/** – Ported verbatim from the `GenFilesMCP` project to support `POST /learn` (`tools/markdown_tool.py` runs the script and uploads; `tools/shared.py` holds the response helpers relocated from the source's `api/shared.py` because the `api` name is taken by this module; `utils/http/*` talk to Open WebUI). Copied byte-for-byte; do not modify.
 - **src/client/** – Wrapper around OpenWebUI REST endpoints and payload builder.
 - **src/services/** – Business logic for tenant routing, user provisioning, and chat management.
-- **src/services/tenant_config_loader.py** – Loads and validates `config/tenants.json` (tenant list) on every call (no caching, no restart needed to pick up changes); fails fast with a clear error on a missing/malformed file, both at startup and on the next request if it breaks later.
-- **config/tenants.json** – Tenant‑to‑assistant mapping. **Not committed** (gitignored, like `.env` — business data, not source code); copy `config/tenants.json.example` to get started. Edit this file (no Python changes needed) to add/change a tenant or rename an assistant — see `specs/014-remove-formatter-pass/contracts/tenants-config-schema.md` for the schema.
+- **src/services/tenant_config_loader.py** – Loads and validates `config/tenants.json` (tenant list + optional `default_agent`) on every call (no caching, no restart needed to pick up changes); fails fast with a clear error on a missing/malformed file, both at startup and on the next request if it breaks later.
+- **config/tenants.json** – Agent/tenant mapping. **Not committed** (gitignored, like `.env` — business data, not source code); copy `config/tenants.json.example` to get started. Add a top-level `default_agent` (`model`, `tool_ids`, `title_generation`) that `POST /proxy/chat` routes to — see `specs/016-simplify-chat-contract/contracts/proxy-chat.md`.
 - **src/models/** – Light‑weight dataclasses representing core entities.
 - **src/persistence/** – SQLite fallback for message persistence (currently a stub).
 - **src/utils/logger.py** – Centralised logger.

@@ -1,4 +1,9 @@
 {
+  "default_agent": {
+    "model": "REPLACE-WITH-OWUI-ASSISTANT-MODEL-NAME",
+    "tool_ids": ["server:0", "chat_id"],
+    "title_generation": false
+  },
   "tenants": [
     {
       "tenant_id": "REPLACE-WITH-REAL-TENANT-UUID",
