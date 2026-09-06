@@ -1,7 +1,7 @@
 """FastAPI entry point for the OWUI Agent Proxy.
 Provides the POST /proxy/chat endpoint — an agentic sub-agent call authenticated
-by the caller's bearer token and routed to the platform's default agent — plus
-POST /learn, the agent's memory / meta-learning tool (spec 015).
+by the caller's bearer token and routed to the requested model_id with live-resolved
+tools (spec 017) — plus POST /learn, the agent's memory / meta-learning tool (spec 015).
 """
 
 from dotenv import load_dotenv
@@ -15,10 +15,13 @@ from typing import Annotated
 from fastapi import Body, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from src.client.openwebui_client import AuthExpiredError, OpenWebUIClient
+from src.client.openwebui_client import (
+    AuthExpiredError,
+    OpenWebUIClient,
+    UnknownModelError,
+)
 from src.config import OPENWEBUI_BASE_URL
 from src.services.chat_management import continue_chat, get_or_create_chat
-from src.services.tenant_routing import resolve_default_agent
 from src.utils.logger import logger
 from src.utils.timing import RequestTiming
 from tools import shared as tools_shared
@@ -111,8 +114,14 @@ async def learn(
         )
 
 
+# Header carrying the service API key used to read the target model's
+# configured tools. Sent by the API connection, not by the parent agent.
+TOOLS_KEY_HEADER = "X-Subagent-Tools-Key"
+
+
 class ChatRequest(BaseModel):
     message: str
+    model_id: str | None = None
     chat_id: str | None = None
 
 
@@ -122,11 +131,12 @@ class ChatResponse(BaseModel):
 
 @app.post("/proxy/chat", response_model=ChatResponse, operation_id="sub_agent")
 def proxy_chat(request: ChatRequest, http_request: Request):
-    """Run the platform's default agent on a message (spec 016, agentic).
+    """Run the requested sub-agent model on a message (spec 017, dynamic routing).
 
-    Authenticates by the caller's bearer token (passthrough), routes to the
-    default agent, continues the given ``chat_id`` or creates a new chat, and
-    returns the agent's answer text.
+    Authenticates by the caller's bearer token (passthrough), resolves the
+    target model's configured tools with the ``X-Subagent-Tools-Key`` header,
+    continues the given ``chat_id`` or creates a new chat, and returns the
+    agent's answer text. No JSON config file is read.
 
     Returns:
         A ``ChatResponse`` with only ``assistant_response``.
@@ -135,6 +145,9 @@ def proxy_chat(request: ChatRequest, http_request: Request):
 
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="message must not be empty")
+
+    if not request.model_id or not request.model_id.strip():
+        raise HTTPException(status_code=400, detail="no valid model_id was sent")
 
     bearer = _get_bearer_token(build_request_context(http_request))
     if not bearer:
@@ -147,14 +160,34 @@ def proxy_chat(request: ChatRequest, http_request: Request):
     if not bearer:
         raise HTTPException(status_code=401, detail="Invalid or missing bearer token")
 
-    default_agent = resolve_default_agent()
-    if not default_agent:
-        raise HTTPException(status_code=500, detail="No default agent configured")
+    tools_key = http_request.headers.get(TOOLS_KEY_HEADER)
+    if not tools_key or not tools_key.strip():
+        raise HTTPException(
+            status_code=401,
+            detail="Missing X-Subagent-Tools-Key header",
+        )
 
-    assistant_id = default_agent.get("model")
+    assistant_id = request.model_id.strip()
     per_user_client = client.with_token(bearer)
 
-    logger.info("Received agentic proxy chat request (chat_id=%s)", request.chat_id)
+    try:
+        tool_ids = client.get_model_tool_ids(assistant_id, tools_key.strip())
+    except UnknownModelError as exc:
+        raise HTTPException(status_code=400, detail=f"unknown model_id '{assistant_id}'") from exc
+    except AuthExpiredError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="tools lookup unauthorized — check X-Subagent-Tools-Key",
+        ) from exc
+    # Timeout/network failure already warns inside the helper and yields [];
+    # built-in tools still apply, so proceed with the empty list.
+    agent_config = {"model": assistant_id, "tool_ids": tool_ids, "title_generation": False}
+
+    logger.info(
+        "Received sub-agent proxy chat request (model=%s, chat_id=%s)",
+        assistant_id,
+        request.chat_id,
+    )
 
     def _run_chat():
         """Continue the given chat or create a new one for the caller's bearer token."""
@@ -165,7 +198,7 @@ def proxy_chat(request: ChatRequest, http_request: Request):
                 request.message,
                 assistant_id,
                 owui_client=per_user_client,
-                tenant_config=default_agent,
+                tenant_config=agent_config,
                 timing=timing,
             )
             if not chat:
@@ -180,7 +213,7 @@ def proxy_chat(request: ChatRequest, http_request: Request):
                 "passthrough",
                 assistant_id,
                 request.message,
-                tenant_config=default_agent,
+                tenant_config=agent_config,
                 owui_client=per_user_client,
                 timing=timing,
             )

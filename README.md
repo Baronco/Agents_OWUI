@@ -11,21 +11,23 @@ This repository implements a Python proxy service that mediates between a web pl
 2. Set required environment variables (example defaults are in `src/config.py`):
    - `OWUI_API_KEY` – API key for OpenWebUI (if needed)
    - `OPENWEBUI_BASE_URL` – Base URL of the OpenWebUI instance (default `http://localhost:3000`)
-3. Provision the tenant config (not in git — treated like `.env`, business data not source code):
+3. (Optional, legacy) Provision the tenant config (not in git — treated like `.env`, business
+   data not source code):
    ```bash
    cp config/tenants.json.example config/tenants.json
    ```
-   then edit it with the real tenant_id/model/tool_ids — see
-   `specs/009-config-externalization/contracts/tenants-config-schema.md`.
+   The chat endpoint (spec 017) no longer reads it — the caller names the model per call.
 4. Run the API server:
    ```bash
    uvicorn api:app --host 0.0.0.0 --port 8000
    ```
-5. Send a request to the proxy endpoint:
+5. Send a request to the proxy endpoint (see `specs/017-dynamic-subagent-routing/contracts/proxy-chat.md`):
    ```bash
    curl -X POST http://localhost:8000/proxy/chat \
         -H "Content-Type: application/json" \
-        -d '{"tenant_id": "tenantA", "client_phone": "+573001234567", "chat_id": "demo-1", "message": "Hello"}'
+        -H "Authorization: Bearer <open-webui-token>" \
+        -H "X-Subagent-Tools-Key: <service-api-key>" \
+        -d '{"message": "Hello", "model_id": "asistente-de-ventas"}'
    ```
 
 ## Docker
@@ -80,12 +82,12 @@ The `POST /learn` endpoint (markdown generator ported from GenFilesMCP) reads th
 
 ## Architecture
 
-- **api.py** – FastAPI entry point exposing `POST /proxy/chat` — an agentic sub-agent call authenticated by the caller's bearer token and routed to the platform's **default agent**; the request body is `{message, chat_id?}` and the response is `{assistant_response}`. Also exposes `POST /learn` (spec 015), the agent's memory / meta-learning tool: it runs a caller-provided Python script to build a Markdown file, uploads it to Open WebUI, and optionally files it into a knowledge collection.
+- **api.py** – FastAPI entry point exposing `POST /proxy/chat` — an agentic sub-agent call authenticated by the caller's bearer token and routed to the requested `model_id` (spec 017); the request body is `{message, model_id, chat_id?}` plus the `X-Subagent-Tools-Key` header, tools are resolved live from the model metadata, and the response is `{assistant_response}`. Also exposes `POST /learn` (spec 015), the agent's memory / meta-learning tool: it runs a caller-provided Python script to build a Markdown file, uploads it to Open WebUI, and optionally files it into a knowledge collection.
 - **tools/** and **utils/** – Ported verbatim from the `GenFilesMCP` project to support `POST /learn` (`tools/markdown_tool.py` runs the script and uploads; `tools/shared.py` holds the response helpers relocated from the source's `api/shared.py` because the `api` name is taken by this module; `utils/http/*` talk to Open WebUI). Copied byte-for-byte; do not modify.
 - **src/client/** – Wrapper around OpenWebUI REST endpoints and payload builder.
 - **src/services/** – Business logic for tenant routing, user provisioning, and chat management.
 - **src/services/tenant_config_loader.py** – Loads and validates `config/tenants.json` (tenant list + optional `default_agent`) on every call (no caching, no restart needed to pick up changes); fails fast with a clear error on a missing/malformed file, both at startup and on the next request if it breaks later.
-- **config/tenants.json** – Agent/tenant mapping. **Not committed** (gitignored, like `.env` — business data, not source code); copy `config/tenants.json.example` to get started. Add a top-level `default_agent` (`model`, `tool_ids`, `title_generation`) that `POST /proxy/chat` routes to — see `specs/016-simplify-chat-contract/contracts/proxy-chat.md`.
+- **config/tenants.json** – Legacy agent/tenant mapping. **Not committed** (gitignored, like `.env` — business data, not source code). `POST /proxy/chat` no longer reads it (spec 017 routes by per-call `model_id`); the file and loader remain for reference only.
 - **src/models/** – Light‑weight dataclasses representing core entities.
 - **src/persistence/** – SQLite fallback for message persistence (currently a stub).
 - **src/utils/logger.py** – Centralised logger.

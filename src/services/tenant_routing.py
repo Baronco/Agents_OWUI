@@ -12,15 +12,14 @@ at a fixed "reload" moment. See specs/009-config-externalization for the full
 discussion.
 """
 
-from typing import TypedDict
+from src.services.tenant_config_loader import TenantConfig, load_config
 
-from src.services.tenant_config_loader import load_config
-
-
-class TenantConfig(TypedDict, total=False):
-    model: str
-    tool_ids: list[str]
-    title_generation: bool
+__all__ = [
+    "TenantConfig",
+    "resolve_assistant",
+    "resolve_default_agent",
+    "resolve_tenant_config",
+]
 
 
 # Fail fast if the file is already broken at process startup (spec 009,
