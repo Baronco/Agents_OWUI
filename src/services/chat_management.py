@@ -22,7 +22,7 @@ import re
 
 from src.client.openwebui_client import AuthExpiredError, OpenWebUIClient
 from src.client.owui_socket import await_completion
-from src.services.tenant_routing import TenantConfig
+from src.services.tenant_config_loader import TenantConfig
 from src.utils.logger import logger
 from src.utils.timing import RequestTiming
 

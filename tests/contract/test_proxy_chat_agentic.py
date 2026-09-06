@@ -1,4 +1,4 @@
-"""Contract test (spec 016, US1): POST /proxy/chat is an agentic chat call.
+"""Contract test (spec 017, US1): POST /proxy/chat routes to the requested model.
 
 Runs offline by monkeypatching the handler's collaborators so no live OWUI
 HTTP/socket happens. The handler is a plain ``def`` dispatched to the thread
@@ -10,13 +10,10 @@ from fastapi.testclient import TestClient
 import api as proxy_api
 
 
-def _patch_common(monkeypatch, sales_text="respuesta"):
-    # No real OWUI calls: stub the default-agent resolution and chat helpers.
-    monkeypatch.setattr(
-        proxy_api,
-        "resolve_default_agent",
-        lambda: {"model": "asistente-de-ventas", "tool_ids": [], "title_generation": False},
-    )
+def _patch_common(monkeypatch, sales_text="respuesta", tool_ids=None):
+    # No real OWUI calls: stub the model-tools lookup and chat helpers.
+    resolved = ["server:1", "chat_id"] if tool_ids is None else tool_ids
+    monkeypatch.setattr(proxy_api.client, "get_model_tool_ids", lambda *a, **k: list(resolved))
     monkeypatch.setattr(
         proxy_api,
         "get_or_create_chat",
@@ -39,23 +36,59 @@ def _patch_common(monkeypatch, sales_text="respuesta"):
     )
 
 
-def _post(client, message="hola", chat_id=None, token="tok"):
+def _post(
+    client,
+    message="hola",
+    model_id="asistente-de-ventas",
+    chat_id=None,
+    token="tok",
+    tools_key="tools-key",
+    extra_headers=None,
+    body=None,
+):
     headers = {"Authorization": f"Bearer {token}"}
-    body = {"message": message}
-    if chat_id is not None:
-        body["chat_id"] = chat_id
+    if tools_key is not None:
+        headers["X-Subagent-Tools-Key"] = tools_key
+    if extra_headers:
+        headers.update(extra_headers)
+    if body is None:
+        body = {"message": message, "model_id": model_id}
+        if chat_id is not None:
+            body["chat_id"] = chat_id
     return client.post("/proxy/chat", json=body, headers=headers)
 
 
-def test_request_needs_only_message_and_optional_chat_id(monkeypatch):
-    """The body requires message; chat_id is optional (absent => new chat)."""
+def test_request_needs_message_model_id_and_tools_key(monkeypatch):
+    """The body requires message + model_id; chat_id stays optional."""
     _patch_common(monkeypatch)
     client = TestClient(proxy_api.app)
 
-    resp = _post(client, message="hola")
+    resp = _post(client, message="hola", model_id="asistente-de-ventas")
 
     assert resp.status_code == 200
     assert resp.json() == {"assistant_response": "respuesta"}
+
+
+def test_missing_model_id_is_rejected(monkeypatch):
+    """A missing model_id returns 400 with a clear message."""
+    _patch_common(monkeypatch)
+    client = TestClient(proxy_api.app)
+
+    resp = _post(client, body={"message": "hola"})
+
+    assert resp.status_code == 400
+    assert "model_id" in resp.json()["detail"]
+
+
+def test_empty_model_id_is_rejected(monkeypatch):
+    """An empty model_id returns 400 with a clear message."""
+    _patch_common(monkeypatch)
+    client = TestClient(proxy_api.app)
+
+    resp = _post(client, message="hola", model_id="   ")
+
+    assert resp.status_code == 400
+    assert "model_id" in resp.json()["detail"]
 
 
 def test_empty_message_is_rejected(monkeypatch):
@@ -73,34 +106,86 @@ def test_missing_bearer_token_is_rejected(monkeypatch):
     _patch_common(monkeypatch)
     client = TestClient(proxy_api.app)
 
-    resp = client.post("/proxy/chat", json={"message": "hola"})
+    resp = client.post(
+        "/proxy/chat",
+        json={"message": "hola", "model_id": "asistente-de-ventas"},
+        headers={"X-Subagent-Tools-Key": "tools-key"},
+    )
 
     assert resp.status_code == 401
 
 
-def test_no_default_agent_is_rejected(monkeypatch):
-    """If no default agent is configured the request fails clearly (500)."""
-    monkeypatch.setattr(proxy_api, "resolve_default_agent", lambda: None)
+def test_missing_tools_key_is_rejected(monkeypatch):
+    """A request without X-Subagent-Tools-Key returns 401 with a clear message."""
+    _patch_common(monkeypatch)
+    client = TestClient(proxy_api.app)
+
+    resp = _post(client, message="hola", tools_key=None)
+
+    assert resp.status_code == 401
+    assert "X-Subagent-Tools-Key" in resp.json()["detail"]
+
+
+def test_unknown_model_id_is_rejected(monkeypatch):
+    """An unknown model_id returns 400 naming the model."""
+    from src.client.openwebui_client import UnknownModelError
+
+    monkeypatch.setattr(
+        proxy_api.client,
+        "get_model_tool_ids",
+        lambda *a, **k: (_ for _ in ()).throw(UnknownModelError("nope")),
+    )
+    client = TestClient(proxy_api.app)
+
+    resp = _post(client, message="hola", model_id="nope")
+
+    assert resp.status_code == 400
+    assert "nope" in resp.json()["detail"]
+
+
+def test_tools_lookup_failure_still_answers(monkeypatch):
+    """A lookup timeout warns and proceeds with an empty tool list."""
+    monkeypatch.setattr(proxy_api.client, "get_model_tool_ids", lambda *a, **k: [])
     monkeypatch.setattr(
         proxy_api,
         "get_or_create_chat",
-        lambda *a, **k: {"chat_id": "c1", "assistant_response": "x"},
+        lambda *a, **k: {"chat_id": "c1", "assistant_response": "ok"},
     )
     client = TestClient(proxy_api.app)
 
     resp = _post(client, message="hola")
 
-    assert resp.status_code == 500
+    assert resp.status_code == 200
+    assert resp.json() == {"assistant_response": "ok"}
+
+
+def test_completion_receives_resolved_tool_list(monkeypatch):
+    """The resolved model tools reach the chat call (not the JSON file)."""
+    seen = {}
+    monkeypatch.setattr(
+        proxy_api.client, "get_model_tool_ids", lambda *a, **k: ["server:1", "chat_id"]
+    )
+
+    def fake_create(*a, **k):
+        seen["tenant_config"] = k.get("tenant_config")
+        seen["model"] = a[1]
+        return {"chat_id": "c1", "assistant_response": "ok"}
+
+    monkeypatch.setattr(proxy_api, "get_or_create_chat", fake_create)
+    client = TestClient(proxy_api.app)
+
+    resp = _post(client, message="hola", model_id="asistente-de-ventas")
+
+    assert resp.status_code == 200
+    assert seen["model"] == "asistente-de-ventas"
+    assert seen["tenant_config"]["tool_ids"] == ["server:1", "chat_id"]
+    assert seen["tenant_config"]["title_generation"] is False
 
 
 def test_chat_id_present_continues_chat(monkeypatch):
     """With a chat_id, the handler calls continue_chat (not get_or_create_chat)."""
     calls = []
-    monkeypatch.setattr(
-        proxy_api,
-        "resolve_default_agent",
-        lambda: {"model": "m", "tool_ids": [], "title_generation": False},
-    )
+    monkeypatch.setattr(proxy_api.client, "get_model_tool_ids", lambda *a, **k: [])
 
     def fake_continue(*a, **k):
         calls.append(("continue", a[0]))
@@ -124,11 +209,7 @@ def test_chat_id_present_continues_chat(monkeypatch):
 def test_chat_id_absent_creates_chat(monkeypatch):
     """Without a chat_id, the handler calls get_or_create_chat."""
     calls = []
-    monkeypatch.setattr(
-        proxy_api,
-        "resolve_default_agent",
-        lambda: {"model": "m", "tool_ids": [], "title_generation": False},
-    )
+    monkeypatch.setattr(proxy_api.client, "get_model_tool_ids", lambda *a, **k: [])
 
     def fake_continue(*a, **k):
         calls.append(("continue", a[0]))
@@ -150,7 +231,7 @@ def test_chat_id_absent_creates_chat(monkeypatch):
 
 
 def test_response_only_has_assistant_response(monkeypatch):
-    """The response contains only assistant_response (no user_id/tenant_id/chat_id)."""
+    """The response contains only assistant_response."""
     _patch_common(monkeypatch)
     client = TestClient(proxy_api.app)
 
@@ -160,18 +241,27 @@ def test_response_only_has_assistant_response(monkeypatch):
     assert set(data.keys()) == {"assistant_response"}
 
 
-def test_bearer_header_reaches_owui_without_duplicate_prefix(monkeypatch):
-    """The incoming 'Bearer <jwt>' header must reach OWUI as-is (no 'Bearer Bearer').
+def test_invalid_token_surfaces_auth_error(monkeypatch):
+    """An OWUI auth failure during the call surfaces as a 401 to the caller."""
+    from src.client.openwebui_client import AuthExpiredError
 
-    Regression: _get_bearer_token returns the full header value, and with_token
-    adds the scheme itself — the handler must strip it once first.
-    """
+    monkeypatch.setattr(proxy_api.client, "get_model_tool_ids", lambda *a, **k: [])
+
+    def fake_continue(*a, **k):
+        raise AuthExpiredError("token expired")
+
+    monkeypatch.setattr(proxy_api, "continue_chat", fake_continue)
+    client = TestClient(proxy_api.app)
+
+    resp = _post(client, message="hola", chat_id="chat-123")
+
+    assert resp.status_code == 401
+
+
+def test_bearer_header_reaches_owui_without_duplicate_prefix(monkeypatch):
+    """The incoming 'Bearer <jwt>' header must reach OWUI as-is (no 'Bearer Bearer')."""
     seen = {}
-    monkeypatch.setattr(
-        proxy_api,
-        "resolve_default_agent",
-        lambda: {"model": "m", "tool_ids": [], "title_generation": False},
-    )
+    monkeypatch.setattr(proxy_api.client, "get_model_tool_ids", lambda *a, **k: [])
 
     def fake_create(*a, **k):
         seen["auth"] = k["owui_client"].session.headers.get("Authorization")
@@ -184,50 +274,3 @@ def test_bearer_header_reaches_owui_without_duplicate_prefix(monkeypatch):
 
     assert resp.status_code == 200
     assert seen["auth"] == "Bearer jwt-abc-123"
-
-
-def test_bare_token_without_scheme_still_works(monkeypatch):
-    """A header value without the 'Bearer ' scheme is forwarded with one prefix."""
-    seen = {}
-    monkeypatch.setattr(
-        proxy_api,
-        "resolve_default_agent",
-        lambda: {"model": "m", "tool_ids": [], "title_generation": False},
-    )
-
-    def fake_create(*a, **k):
-        seen["auth"] = k["owui_client"].session.headers.get("Authorization")
-        return {"chat_id": "c1", "assistant_response": "ok", "output": [], "follow_ups": []}
-
-    monkeypatch.setattr(proxy_api, "get_or_create_chat", fake_create)
-    client = TestClient(proxy_api.app)
-
-    resp = client.post(
-        "/proxy/chat",
-        json={"message": "hola"},
-        headers={"Authorization": "tok-sin-prefijo"},
-    )
-
-    assert resp.status_code == 200
-    assert seen["auth"] == "Bearer tok-sin-prefijo"
-
-
-def test_invalid_token_surfaces_auth_error(monkeypatch):
-    """An OWUI auth failure during the call surfaces as a 401 to the caller."""
-    from src.client.openwebui_client import AuthExpiredError
-
-    monkeypatch.setattr(
-        proxy_api,
-        "resolve_default_agent",
-        lambda: {"model": "m", "tool_ids": [], "title_generation": False},
-    )
-
-    def fake_continue(*a, **k):
-        raise AuthExpiredError("token expired")
-
-    monkeypatch.setattr(proxy_api, "continue_chat", fake_continue)
-    client = TestClient(proxy_api.app)
-
-    resp = _post(client, message="hola", chat_id="chat-123")
-
-    assert resp.status_code == 401

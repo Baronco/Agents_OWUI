@@ -15,6 +15,7 @@ degrading per-request.
 
 import json
 from pathlib import Path
+from typing import TypedDict
 
 from src.config import tenants_config_path
 from src.utils.logger import logger
@@ -22,6 +23,19 @@ from src.utils.logger import logger
 
 class ConfigError(Exception):
     """Raised when ``config/tenants.json`` is missing, malformed, or invalid."""
+
+
+class TenantConfig(TypedDict, total=False):
+    """Agent configuration shape (model, tools, title generation).
+
+    Lives here (not in ``tenant_routing``) so modules that only need the type
+    do not trigger the import-time ``load_config()`` health check — the chat
+    path (spec 017) must start without any JSON config file present.
+    """
+
+    model: str
+    tool_ids: list[str]
+    title_generation: bool
 
 
 def _tenant_entry(raw: dict, label: str, file_path: Path) -> dict:
