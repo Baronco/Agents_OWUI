@@ -1,4 +1,4 @@
-"""Concurrency test for the /proxy/chat handler (spec 016, agentic).
+"""Concurrency test for the /proxy/chat handler (specs 016-017, agentic).
 
 The handler must be dispatched to Starlette's thread pool, not run on the
 event loop, so one agentic chat request cannot block the whole server while
@@ -36,3 +36,15 @@ def test_agentic_handler_does_not_use_provisioning():
 
     src = _inspect.getsource(proxy_api.proxy_chat)
     assert "provision_user" not in src
+
+
+def test_agentic_handler_does_not_read_tenants_json():
+    # Spec 017: the chat path resolves the model and its tools per request and
+    # must not touch tenant routing or the tenants JSON file. (The
+    # `tenant_config` kwarg name is kept only as plumbing into chat_management.)
+    import inspect as _inspect
+
+    src = _inspect.getsource(proxy_api.proxy_chat)
+    assert "resolve_default_agent" not in src
+    assert "tenant_routing" not in src
+    assert "load_config" not in src
