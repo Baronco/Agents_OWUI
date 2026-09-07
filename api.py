@@ -127,19 +127,21 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     assistant_response: str
+    subagent_chat_id: str
 
 
 @app.post("/proxy/chat", response_model=ChatResponse, operation_id="sub_agent")
 def proxy_chat(request: ChatRequest, http_request: Request):
-    """Run the requested sub-agent model on a message (spec 017, dynamic routing).
+    """Run the requested sub-agent model on a message (specs 017-018, dynamic routing).
 
     Authenticates by the caller's bearer token (passthrough), resolves the
     target model's configured tools with the ``X-Subagent-Tools-Key`` header,
     continues the given ``chat_id`` or creates a new chat, and returns the
-    agent's answer text. No JSON config file is read.
+    agent's answer text plus the live sub-agent session id. No JSON config
+    file is read.
 
     Returns:
-        A ``ChatResponse`` with only ``assistant_response``.
+        A ``ChatResponse`` with ``assistant_response`` and ``subagent_chat_id``.
     """
     timing = RequestTiming()
 
@@ -236,4 +238,6 @@ def proxy_chat(request: ChatRequest, http_request: Request):
     timing.round_trips = per_user_client.round_trips
     timing.emit(chat_id=chat["chat_id"])
 
-    return ChatResponse(assistant_response=sales_text)
+    # chat["chat_id"] is the live session id in all paths: newly created id on
+    # first call, echoed id on continuation, new id when continuation falls back.
+    return ChatResponse(assistant_response=sales_text, subagent_chat_id=chat["chat_id"])
