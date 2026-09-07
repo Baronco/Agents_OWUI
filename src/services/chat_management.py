@@ -14,7 +14,7 @@ Tools run on the Open WebUI side. The proxy replicates the OWUI frontend:
 
 See specs/005-reduce-api-latency/research.md (Finding 3) and src/client/owui_socket.py.
 """
-from typing import Dict, Optional
+from typing import Dict, Optional, TypedDict
 from contextlib import nullcontext
 import uuid
 import time
@@ -22,9 +22,19 @@ import re
 
 from src.client.openwebui_client import AuthExpiredError, OpenWebUIClient
 from src.client.owui_socket import await_completion
-from src.services.tenant_config_loader import TenantConfig
 from src.utils.logger import logger
 from src.utils.timing import RequestTiming
+
+
+class TenantConfig(TypedDict, total=False):
+    """Agent configuration shape (model, tools, title generation).
+
+    Built per request in code (spec 017); no longer read from any JSON file.
+    """
+
+    model: str
+    tool_ids: list[str]
+    title_generation: bool
 
 _DETAILS_BLOCK_RE = re.compile(r'<details[^>]*>.*?</details>', re.DOTALL)
 

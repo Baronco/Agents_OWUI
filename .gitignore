@@ -18,9 +18,11 @@ Thumbs.db
 *.tmp
 *.swp
 *.log
-token_store.json
+.pytest_cache/
+.ruff_cache/
+__blobstorage__/
+__queuestorage__/
 chat-export-1780805265444.json
-owui_openapi.json
 temp_test.py
 specs/
 .claude/
@@ -30,13 +32,4 @@ develop_standars/
 AGENTS.md
 CLAUDE.md
 .specify/
-token_store.json
 open-webui/
-
-# Real tenant data is environment-specific business data, treated like .env
-# (provision manually per environment) — see config/tenants.json.example.
-config/tenants.json
-
-# Per-user token cache (one file per user, spec 011). Rebuildable runtime
-# data, like token_store.json — never committed.
-users/
