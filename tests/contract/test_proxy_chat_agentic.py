@@ -66,7 +66,61 @@ def test_request_needs_message_model_id_and_tools_key(monkeypatch):
     resp = _post(client, message="hola", model_id="asistente-de-ventas")
 
     assert resp.status_code == 200
-    assert resp.json() == {"assistant_response": "respuesta"}
+    assert resp.json() == {"assistant_response": "respuesta", "subagent_chat_id": "c1"}
+
+
+def test_create_path_returns_new_session_id(monkeypatch):
+    """First call (no chat_id) returns the newly created session id."""
+    _patch_common(monkeypatch)
+    client = TestClient(proxy_api.app)
+
+    resp = _post(client, message="hola", model_id="asistente-de-ventas")
+
+    assert resp.status_code == 200
+    assert resp.json()["subagent_chat_id"] == "c1"
+
+
+def test_continue_path_echoes_session_id(monkeypatch):
+    """Second call with a chat_id gets the same session id back."""
+    _patch_common(monkeypatch)
+    client = TestClient(proxy_api.app)
+
+    resp = _post(client, message="hola", model_id="asistente-de-ventas", chat_id="c1")
+
+    assert resp.status_code == 200
+    assert resp.json()["subagent_chat_id"] == "c1"
+
+
+def test_fallback_returns_new_session_id_not_stale(monkeypatch):
+    """When continuation fails over to a new chat, the new id is returned."""
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        proxy_api,
+        "continue_chat",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        proxy_api,
+        "get_or_create_chat",
+        lambda *a, **k: {"chat_id": "c-new", "assistant_response": "ok"},
+    )
+    client = TestClient(proxy_api.app)
+
+    resp = _post(client, message="hola", model_id="asistente-de-ventas", chat_id="stale")
+
+    assert resp.status_code == 200
+    assert resp.json()["subagent_chat_id"] == "c-new"
+
+
+def test_session_id_always_present_and_non_empty(monkeypatch):
+    """Every successful response carries a non-empty subagent_chat_id."""
+    _patch_common(monkeypatch, sales_text="")
+    client = TestClient(proxy_api.app)
+
+    resp = _post(client, message="hola", model_id="asistente-de-ventas")
+
+    assert resp.status_code == 200
+    assert resp.json()["subagent_chat_id"]
 
 
 def test_missing_model_id_is_rejected(monkeypatch):
@@ -156,7 +210,7 @@ def test_tools_lookup_failure_still_answers(monkeypatch):
     resp = _post(client, message="hola")
 
     assert resp.status_code == 200
-    assert resp.json() == {"assistant_response": "ok"}
+    assert resp.json() == {"assistant_response": "ok", "subagent_chat_id": "c1"}
 
 
 def test_completion_receives_resolved_tool_list(monkeypatch):
@@ -230,15 +284,15 @@ def test_chat_id_absent_creates_chat(monkeypatch):
     assert any(c[0] == "create" for c in calls)
 
 
-def test_response_only_has_assistant_response(monkeypatch):
-    """The response contains only assistant_response."""
+def test_response_has_answer_and_session_id(monkeypatch):
+    """The response contains assistant_response and subagent_chat_id only."""
     _patch_common(monkeypatch)
     client = TestClient(proxy_api.app)
 
     resp = _post(client, message="hola")
 
     data = resp.json()
-    assert set(data.keys()) == {"assistant_response"}
+    assert set(data.keys()) == {"assistant_response", "subagent_chat_id"}
 
 
 def test_invalid_token_surfaces_auth_error(monkeypatch):
