@@ -44,8 +44,15 @@ With `-e` flags instead of an env file (note `-e PORT=...` is required):
 docker run -d -e OPENWEBUI_BASE_URL=http://host.docker.internal:3000 -e PORT=8000 -p 8000:8000 owui_agents
 ```
 
-Consumers that only pull the published image just set `OPENWEBUI_BASE_URL` manually — no
-additional local files are required. The container runs as a non-root `app` user.
+## Pull the published image
+
+```bash
+docker pull ghcr.io/baronco/owui_agents:v0.1.0
+docker run -d --env-file .env -e PORT=8000 -p 8000:8000 ghcr.io/baronco/owui_agents:v0.1.0
+```
+
+Consumers that only pull the published image just set `OPENWEBUI_BASE_URL` (and `PORT`)
+manually — no additional local files are required. The container runs as a non-root `app` user.
 
 ## Connect it in Open WebUI
 
