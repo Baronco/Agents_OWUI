@@ -1,37 +1,15 @@
-# Builds the image, creates the persistent volume, and runs the proxy — all
-# with `docker compose up --build`. The named volume `owui-proxy-data` holds
-# two folders, /data/config and /data/users, and survives `docker compose
-# down` (without -v).
-#
-# IMPORTANT — seed the tenant config on the volume BEFORE the first `up`.
-# The proxy fails fast at startup if /data/config/tenants.json is missing
-# (by design), so it can't be copied in via `exec` after a crash. Seed it
-# with a throwaway container first:
-#   docker build -t owui-proxy .
-#   docker volume create owui-proxy-data
-#   docker run --rm -v owui-proxy-data:/data owui-proxy \
-#     sh -c "mkdir -p /data/config /data/users && cp /app/config/tenants.json.example /data/config/tenants.json"
-#   # edit /data/config/tenants.json with real tenants (e.g. via another
-#   # throwaway container or a bind mount), then:
-#   docker compose up -d
-
+# Builds the image and runs the proxy — all with `docker compose up --build`.
+# Configuration comes only from environment values (see .env.example).
+# No volumes, no config files: copy .env, then `docker compose up -d`.
 services:
-  proxy:
+  owui_agents:
     build: .
-    image: owui-proxy
-    env_file: .env          # secrets: OWUI_API_KEY, USER_PASSWORD_SECRET, OPENWEBUI_BASE_URL, ...
+    image: owui_agents
+    env_file: .env
     environment:
-      # Point the app at the mounted volume (also baked as image defaults).
-      TENANTS_CONFIG_PATH: /data/config/tenants.json
-      USERS_DIR: /data/users
-    volumes:
-      - owui-proxy-data:/data
+      # Forward PORT into the container so mapping and listener stay in sync.
+      # PORT is required: set it in .env (see .env.example) or in the shell.
+      PORT: ${PORT}
     ports:
-      - "8000:8000"
+      - "${PORT}:${PORT}"
     restart: unless-stopped
-
-volumes:
-  owui-proxy-data:
-    # Pin the exact name (no project prefix) so the seed command above and
-    # compose use the same volume.
-    name: owui-proxy-data

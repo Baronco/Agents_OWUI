@@ -5,9 +5,6 @@
 .env
 .env.*
 !.env.example
-config/tenants.json
-users/
-token_store.json
 
 # Virtual env & caches
 .venv
@@ -24,6 +21,8 @@ open-webui/
 # Repo/spec/tooling metadata not needed at runtime
 .git
 .gitignore
+docs/
+imgs/
 specs/
 .specify/
 .claude/

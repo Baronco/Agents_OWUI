@@ -1,127 +1,106 @@
-# OWUI Agent Proxy
+# owui_agents
 
-This repository implements a Python proxy service that mediates between a web plugin and the OpenWebUI API.
+Lets a parent agent delegate work to sub-agents in Open WebUI through a single HTTP call:
+you send a message and the target sub-agent (`model_id`), and you get back the answer plus the
+session id to continue the conversation later. It solves auth passthrough, per-model tool
+resolution, and session tracking, so the parent agent doesn't have to handle any of that.
 
-## Quickstart
+## Environment variables
 
-1. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. Set required environment variables (example defaults are in `src/config.py`):
-   - `OWUI_API_KEY` – API key for OpenWebUI (if needed)
-   - `OPENWEBUI_BASE_URL` – Base URL of the OpenWebUI instance (default `http://localhost:3000`)
-3. (Optional, legacy) Provision the tenant config (not in git — treated like `.env`, business
-   data not source code):
-   ```bash
-   cp config/tenants.json.example config/tenants.json
-   ```
-   The chat endpoint (spec 017) no longer reads it — the caller names the model per call.
-4. Run the API server:
-   ```bash
-   uvicorn api:app --host 0.0.0.0 --port 8000
-   ```
-5. Send a request to the proxy endpoint (see `specs/017-dynamic-subagent-routing/contracts/proxy-chat.md`):
-   ```bash
-   curl -X POST http://localhost:8000/proxy/chat \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer <open-webui-token>" \
-        -H "X-Subagent-Tools-Key: <service-api-key>" \
-        -d '{"message": "Hello", "model_id": "asistente-de-ventas"}'
-   ```
+Only one value is needed (see `.env.example`):
 
-## Docker
+| Variable | Description |
+|----------|-------------|
+| `OPENWEBUI_BASE_URL` | Open WebUI instance the proxy talks to. Inside a container this must NOT be `localhost` — use `http://host.docker.internal:3000` or a service name on a shared Docker network. |
+| `PORT` | **Required.** Port the container listens on (e.g. `8000`). The app will not start without it — always set it explicitly: `-e PORT=...`, `.env`, or the cloud platform's env settings. |
 
-The proxy ships with a `Dockerfile` and `docker-compose.yml`. Per-environment
-data (tenant config + per-user tokens) lives on a **persistent named volume**
-mounted at `/data` with two folders — `config/` and `users/` — so it survives
-container recreation and is editable without rebuilding the image. Secrets are
-passed via `.env` (never baked into the image).
+The caller bearer and the sub-agent tools key travel per request in the `Authorization` and
+`X-Subagent-Tools-Key` headers — never in env.
+
+## Deploy locally with docker compose
 
 ```bash
-# 1. Build the image and create the volume
-docker build -t owui-proxy .
-docker volume create owui-proxy-data
-
-# 2. Seed the tenant config onto the volume BEFORE first start.
-#    (The proxy fails fast at startup if config is missing, so it can't be
-#    copied in after a crash.)
-cat config/tenants.json | docker run --rm -i -v owui-proxy-data:/data owui-proxy \
-  sh -c "mkdir -p /data/config /data/users && cat > /data/config/tenants.json"
-
-# 3. Run (compose creates container + volume together)
-docker compose up -d
+cp .env.example .env   # fill in OPENWEBUI_BASE_URL (values must be UNQUOTED)
+docker compose up -d --build
 ```
 
-Notes:
-- **`OPENWEBUI_BASE_URL` inside a container must NOT be `localhost`** (that's
-  the container itself). Use `http://host.docker.internal:3000` or a service
-  name on a shared Docker network.
-- **`.env` values must be UNQUOTED** — `docker --env-file` does not strip
-  quotes (unlike a shell), so quotes would become part of the value. Copy
-  `.env.example` (already unquoted) and fill in real values.
-- **Changing `USER_PASSWORD_SECRET` invalidates all previously provisioned
-  users** (their derived passwords change), so they'd fail to sign in. Set it
-  once and keep it stable.
-- The container runs as a non-root `app` user. The `config/` volume folder is
-  authoritative and must persist; the `users/` folder is a rebuildable token
-  cache (losing it only forces a one-time re-login per client).
-- Token storage is **one JSON file per user** under `users/`, keyed by
-  `(client_phone, tenant_id)` — the same layout locally and in the container.
+If port 8000 is busy locally, change it in `.env` (`PORT=8001`) and re-run compose —
+both the mapping and the listener follow that single value:
 
-### Markdown / meta-learning endpoint variables (spec 015)
+```bash
+PORT=8001 docker compose up -d --build
+```
 
-The `POST /learn` endpoint (markdown generator ported from GenFilesMCP) reads these from `.env`:
+## Build and run the image locally
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OWUI_URL` | `http://localhost:8080` | Open WebUI base URL used for user-id lookup, upload, and knowledge filing. Point at the **same** instance as `OPENWEBUI_BASE_URL`; inside a container use `http://host.docker.internal:3000`. |
-| `ENABLE_CREATE_KNOWLEDGE` | `true` | Whether the generated file is added to a knowledge collection. |
-| `KNOWLEDGE_COLLECTION_NAME` | `My Generated Files` | Name of the knowledge collection that receives generated files. |
-| `DOWNLOAD_HTML_BUTTON` | `false` | The `/learn` handler forces this to `false`, returning the raw structured result (never the HTML download-page). |
+```bash
+docker build -t owui_agents .
+docker run -d --env-file .env -e PORT=8000 -p 8000:8000 owui_agents
+```
 
-## Architecture
+With `-e` flags instead of an env file (note `-e PORT=...` is required):
 
-- **api.py** – FastAPI entry point exposing `POST /proxy/chat` — an agentic sub-agent call authenticated by the caller's bearer token and routed to the requested `model_id` (spec 017); the request body is `{message, model_id, chat_id?}` plus the `X-Subagent-Tools-Key` header, tools are resolved live from the model metadata, and the response is `{assistant_response}`. Also exposes `POST /learn` (spec 015), the agent's memory / meta-learning tool: it runs a caller-provided Python script to build a Markdown file, uploads it to Open WebUI, and optionally files it into a knowledge collection.
-- **tools/** and **utils/** – Ported verbatim from the `GenFilesMCP` project to support `POST /learn` (`tools/markdown_tool.py` runs the script and uploads; `tools/shared.py` holds the response helpers relocated from the source's `api/shared.py` because the `api` name is taken by this module; `utils/http/*` talk to Open WebUI). Copied byte-for-byte; do not modify.
-- **src/client/** – Wrapper around OpenWebUI REST endpoints and payload builder.
-- **src/services/** – Business logic for tenant routing, user provisioning, and chat management.
-- **src/services/tenant_config_loader.py** – Loads and validates `config/tenants.json` (tenant list + optional `default_agent`) on every call (no caching, no restart needed to pick up changes); fails fast with a clear error on a missing/malformed file, both at startup and on the next request if it breaks later.
-- **config/tenants.json** – Legacy agent/tenant mapping. **Not committed** (gitignored, like `.env` — business data, not source code). `POST /proxy/chat` no longer reads it (spec 017 routes by per-call `model_id`); the file and loader remain for reference only.
-- **src/models/** – Light‑weight dataclasses representing core entities.
-- **src/persistence/** – SQLite fallback for message persistence (currently a stub).
-- **src/utils/logger.py** – Centralised logger.
-- **scripts/** – Manual debugging/diagnostic tools (e.g. `diag_socket.py`), NOT part of the running application — never imported by `api.py`/`src/`.
+```bash
+docker run -d -e OPENWEBUI_BASE_URL=http://host.docker.internal:3000 -e PORT=8000 -p 8000:8000 owui_agents
+```
 
-## Concurrency
+## Pull the published image
 
-`proxy_chat` is intentionally a **synchronous** (`def`, not `async def`) endpoint.
-Every call it makes is blocking I/O (HTTP via `requests`, a socket.io connect, a
-`threading.Event.wait` of up to 180s) with no `await`, so declaring it `async`
-would run it on the single event loop and **block the entire server for each
-request's full duration** — different clients/tenants could not be served at the
-same time. As a plain `def`, Starlette dispatches it to its thread pool, so
-independent clients run concurrently. **Do not re-add `async`** to this handler
-without first making the whole call chain genuinely async. Requests sharing the
-same `(client_phone, tenant_id)` are serialized through an in-process lock so
-two near-simultaneous messages from one client can't race into duplicate chat
-creation. See `specs/010-performance-efficiency-audit/`.
+```bash
+docker pull ghcr.io/baronco/owui_agents:v0.1.0
+docker run -d --env-file .env -e PORT=8000 -p 8000:8000 ghcr.io/baronco/owui_agents:v0.1.0
+```
 
-## Performance: native function calling
+Consumers that only pull the published image just set `OPENWEBUI_BASE_URL` (and `PORT`)
+manually — no additional local files are required. The container runs as a non-root `app` user.
 
-The proxy calls OpenWebUI's `/api/chat/completions` with `params.function_calling: "native"`
-whenever `tool_ids` are configured. This is **required** for latency: without it, OpenWebUI
-runs a prompt-based tool pre-pass — a full extra LLM round-trip on *every* message just to
-decide whether a tool is needed — before generating the actual answer. Native function calling
-passes the tool specs inline so the model decides in a single pass. See
-`specs/005-reduce-api-latency/contracts/owui-completion.md`.
+## Connect it in Open WebUI
 
-The proxy also avoids an upfront token-validation round-trip per request: the cached token is
-trusted while unexpired, and a stale token is recovered lazily (a 401 triggers one
-re-authentication + retry). Each request logs a `request_timing` line with a per-phase
-breakdown (`provision_ms`, `completion_ms`, `tool_ms`, `persist_ms`, `total_ms`, `round_trips`).
+Register the proxy as an OpenAPI tool connection pointing at its `/openapi.json`:
 
-## Notes
+<p align="center">
+  <img src="imgs/api_connection.png" alt="Open WebUI API connection for sub-agents" width="60%" />
+</p>
 
-- User credentials are generated with simple placeholders; integrate a secure password generator and secret storage for real deployments.
-- Message persistence is handled by OpenWebUI; the proxy is stateless and persists chats via the OpenWebUI chat API.
+- **URL**: `http://host.docker.internal:8000`, OpenAPI Spec: `openapi.json`.
+- **Auth**: Session (forwards the system user session credentials).
+- **Headers**: add `X-Subagent-Tools-Key` with the service API key.
+
+For that key, create a dedicated user group in Open WebUI with an admin user that has API-key
+creation enabled for the group's permissions, and use a key from that account. That key is what
+goes in the `X-Subagent-Tools-Key` header.
+
+## Example: main agent with two sub-agents
+
+Create a main agent with the system prompt at `System Prompts/Main_System_Prompt.md`, with only
+this API enabled as its tool. Its system prompt tells it about two available sub-agents:
+
+- **`web-search-subagent`** — web research and up-to-date information. Uses the built-in web
+  search tool.
+- **`gen-files-subagent`** — document generation (`.xlsx`, `.docx`, `.pptx`, `.md`, `.pdf`) and
+  `.docx` review. Uses the GenFiles OpenAPI document generation tool
+  ([GenFilesMCP](https://github.com/Baronco/GenFilesMCP/tree/dev)).
+
+Recommendations for this setup:
+
+- Set **function calling to Native** on the main agent and on both sub-agents.
+- On each sub-agent, enable **Builtin Tools** if it should use built-ins like web search, or
+  skills through the `view_skill` builtin of Open WebUI.
+
+The example below shows a non-admin user asking for last month's TRM, the main agent delegating
+to `web-search-subagent`, and then to `gen-files-subagent` for a PDF report with charts:
+
+<p align="center">
+  <img src="imgs/example.png" alt="End-to-end sub-agent example" width="80%" />
+</p>
+
+The generated PDF from this example is attached in the repo:
+[`imgs/colombia_trm_august_2026_report.pdf`](imgs/colombia_trm_august_2026_report.pdf).
+
+Setup notes for this example:
+
+- The example user is **not** an admin. The main model, both sub-agents, and the generation tool
+  are **public**.
+- The sub-agents are **hidden from workspaces**, so the user always goes through the main agent.
+- Calls to sub-agents persist as the user's own chats.
+- Validated with Open WebUI **v0.11.3**.
