@@ -2,7 +2,6 @@
 Provides basic methods to call OpenWebUI REST endpoints.
 """
 
-import os
 import requests
 from typing import Any, Dict
 
@@ -30,9 +29,8 @@ class OpenWebUIClient:
         self.session = requests.Session()
         # Count of OWUI HTTP round-trips made by this (request-scoped) client.
         self.round_trips = 0
-        api_key = os.getenv("OWUI_API_KEY")
-        if api_key:
-            self.session.headers.update({"Authorization": f"Bearer {api_key}"})
+        # No default Authorization header: every call authenticates explicitly
+        # per request (caller bearer via with_token(), tools key inline).
 
     def _check_auth(self, resp: requests.Response) -> None:
         if resp.status_code == 401:

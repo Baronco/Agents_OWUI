@@ -11,15 +11,12 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project
 
-# Application source. The real config/tenants.json, .env, users/ and
-# token_store.json are excluded via .dockerignore, so only code + the config
-# TEMPLATE (config/tenants.json.example) land in the image.
+# Application source. Secrets (.env) are excluded via .dockerignore;
+# configuration comes only from environment values at runtime.
 COPY api.py ./
 COPY src/ ./src/
 COPY tools/ ./tools/
 COPY utils/ ./utils/
-COPY owui_tools/ ./owui_tools/
-COPY config/ ./config/
 
 # Finalize the environment
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -29,17 +26,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # runtime drops to `app` to reduce risk from container compromise.
 RUN groupadd -r app \
     && useradd -r -g app -d /home/app -m -s /bin/bash app \
-    && mkdir -p /data/config /data/users \
-    && chown -R app:app /app /data
+    && chown -R app:app /app
 
 ENV HOME=/home/app
-# Per-environment data lives on the mounted volume at /data
-ENV TENANTS_CONFIG_PATH=/data/config/tenants.json
-ENV USERS_DIR=/data/users
 USER app
 
 EXPOSE 8000
 
 # Run the real FastAPI entrypoint (api.py exposes `app`), bound to 0.0.0.0
-# so the port is reachable from outside the container.
-CMD ["uv", "run", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+# so the port is reachable from outside the container. PORT is REQUIRED: it
+# tells the app which internal port to listen on (it must match the right
+# side of the -p HOST:CONTAINER mapping). Clouds like Azure set PORT
+# themselves; locally you set it with -e PORT=... or in .env.
+CMD ["sh", "-c", "exec uv run uvicorn api:app --host 0.0.0.0 --port $PORT"]

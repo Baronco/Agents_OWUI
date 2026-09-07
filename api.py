@@ -1,18 +1,14 @@
 """FastAPI entry point for the OWUI Agent Proxy.
 Provides the POST /proxy/chat endpoint — an agentic sub-agent call authenticated
 by the caller's bearer token and routed to the requested model_id with live-resolved
-tools (spec 017) — plus POST /learn, the agent's memory / meta-learning tool (spec 015).
+tools (spec 017).
 """
 
 from dotenv import load_dotenv
 
 load_dotenv()
-from json import dumps, loads
-from os import getenv
-from pathlib import Path
-from typing import Annotated
 
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from src.client.openwebui_client import (
@@ -24,94 +20,73 @@ from src.config import OPENWEBUI_BASE_URL
 from src.services.chat_management import continue_chat, get_or_create_chat
 from src.utils.logger import logger
 from src.utils.timing import RequestTiming
-from tools import shared as tools_shared
-from tools.markdown_tool import generate_markdown as _generate_markdown
-from tools.shared import (
-    DOWNLOAD_HTML_BUTTON,
-    build_download_response,
-    build_request_context,
-)
-from utils.config.argument_descriptions import ARGUMENT_DESCRIPTIONS
+from tools.shared import build_request_context
 from utils.http.authorization import _get_bearer_token
 
 app = FastAPI()
 client = OpenWebUIClient(base_url=OPENWEBUI_BASE_URL)
 
-# Markdown generation endpoint configuration (spec 015). Read from the
-# environment with the same defaults as the GenFilesMCP source project.
-OWUI_URL = getenv("OWUI_URL", "http://localhost:8080")
-ENABLE_CREATE_KNOWLEDGE = getenv("ENABLE_CREATE_KNOWLEDGE", "true").lower() == "true"
-KNOWLEDGE_COLLECTION_NAME = getenv("KNOWLEDGE_COLLECTION_NAME", "My Generated Files").strip()
-
-# Always return the raw structured result (never the HTML download button page),
-# so the handler can validate success/error and reply with a plain message.
-tools_shared.DOWNLOAD_HTML_BUTTON = False
-
-# Tool instructions for the markdown generator (spec 015), copied verbatim
-# from GenFilesMCP. The source resolves the {{SUCCESS_DELIVERY_RULE}}
-# placeholder depending on DOWNLOAD_HTML_BUTTON; we replicate that rule.
-_MARKDOWN_INSTRUCTIONS_FILE = Path(__file__).parent / "tools" / "markdown_instructions.md"
-with _MARKDOWN_INSTRUCTIONS_FILE.open("r", encoding="utf-8") as _f:
-    MARKDOWN_DESCRIPTION = _f.read()
-if DOWNLOAD_HTML_BUTTON:
-    MARKDOWN_DESCRIPTION = MARKDOWN_DESCRIPTION.replace(
-        "{{SUCCESS_DELIVERY_RULE}}",
-        "On success the chat shows a download button — never invent a download link.",
-    )
-
-
-@app.post("/learn", description=MARKDOWN_DESCRIPTION, operation_id="my_meta_learning")
-async def learn(
-    request: Request,
-    python_script: Annotated[
-        str, Body(..., description=ARGUMENT_DESCRIPTIONS["common_args"]["python_script"])
-    ],
-    file_name: Annotated[
-        str, Body(..., description=ARGUMENT_DESCRIPTIONS["common_args"]["file_name"])
-    ],
-):
-    """Record a learning as a Markdown document (spec 015, meta-learning).
-
-    Runs the caller's script to fill the markdown buffer, uploads the resulting
-    ``.md`` file to Open WebUI, optionally files it into a knowledge collection,
-    and returns a download result. Ported verbatim from GenFilesMCP.
-
-    Exposed at ``/learn`` — the agent's memory / meta-learning tool: call it to
-    capture knowledge that goes beyond what is in the agent's base training.
-
-    Returns:
-        On success, ``{"message": "Meta-learning created"}``. On failure, the
-        underlying error payload (with an ``error`` key).
-    """
-    logger.info("Received request to record learning (Markdown document)")
-    try:
-        request_context = build_request_context(request)
-        result = _generate_markdown(
-            python_script,
-            file_name,
-            request_context,
-            OWUI_URL,
-            ENABLE_CREATE_KNOWLEDGE,
-            KNOWLEDGE_COLLECTION_NAME,
-        )
-        response = build_download_response(result)
-        # With DOWNLOAD_HTML_BUTTON=False build_download_response returns the
-        # structured result unchanged. A failure carries an "error" key; a
-        # success never does — so report a plain confirmation message.
-        if isinstance(response, str):
-            try:
-                response = loads(response)
-            except ValueError:
-                return {"error": response}
-        if isinstance(response, dict) and "error" in response:
-            return response
-        return {"message": "Meta-learning created"}
-    except Exception as exc:
-        logger.error(f"Error generating Meta-learning: {exc}")
-        return dumps(
-            {"error": "An error occurred while generating the Meta-learning."},
-            ensure_ascii=False,
-        )
+# --- POST /learn disabled (spec 019). Uncomment to restore. ---
+# from json import dumps, loads
+# from pathlib import Path
+# from typing import Annotated
+# from fastapi import Body
+# from tools import shared as tools_shared
+# from tools.markdown_tool import generate_markdown as _generate_markdown
+# from tools.shared import DOWNLOAD_HTML_BUTTON, build_download_response
+# from utils.config.argument_descriptions import ARGUMENT_DESCRIPTIONS
+#
+# OWUI_URL = getenv("OWUI_URL", "http://localhost:8080")
+# ENABLE_CREATE_KNOWLEDGE = getenv("ENABLE_CREATE_KNOWLEDGE", "true").lower() == "true"
+# KNOWLEDGE_COLLECTION_NAME = getenv("KNOWLEDGE_COLLECTION_NAME", "My Generated Files").strip()
+# tools_shared.DOWNLOAD_HTML_BUTTON = False
+# _MARKDOWN_INSTRUCTIONS_FILE = Path(__file__).parent / "tools" / "markdown_instructions.md"
+# with _MARKDOWN_INSTRUCTIONS_FILE.open("r", encoding="utf-8") as _f:
+#     MARKDOWN_DESCRIPTION = _f.read()
+# if DOWNLOAD_HTML_BUTTON:
+#     MARKDOWN_DESCRIPTION = MARKDOWN_DESCRIPTION.replace(
+#         "{{SUCCESS_DELIVERY_RULE}}",
+#         "On success the chat shows a download button — never invent a download link.",
+#     )
+#
+#
+# @app.post("/learn", description=MARKDOWN_DESCRIPTION, operation_id="my_meta_learning")
+# async def learn(
+#     request: Request,
+#     python_script: Annotated[
+#         str, Body(..., description=ARGUMENT_DESCRIPTIONS["common_args"]["python_script"])
+#     ],
+#     file_name: Annotated[
+#         str, Body(..., description=ARGUMENT_DESCRIPTIONS["common_args"]["file_name"])
+#     ],
+# ):
+#     """Record a learning as a Markdown document (spec 015, meta-learning)."""
+#     logger.info("Received request to record learning (Markdown document)")
+#     try:
+#         request_context = build_request_context(request)
+#         result = _generate_markdown(
+#             python_script,
+#             file_name,
+#             request_context,
+#             OWUI_URL,
+#             ENABLE_CREATE_KNOWLEDGE,
+#             KNOWLEDGE_COLLECTION_NAME,
+#         )
+#         response = build_download_response(result)
+#         if isinstance(response, str):
+#             try:
+#                 response = loads(response)
+#             except ValueError:
+#                 return {"error": response}
+#         if isinstance(response, dict) and "error" in response:
+#             return response
+#         return {"message": "Meta-learning created"}
+#     except Exception as exc:
+#         logger.error(f"Error generating Meta-learning: {exc}")
+#         return dumps(
+#             {"error": "An error occurred while generating the Meta-learning."},
+#             ensure_ascii=False,
+#         )
 
 
 # Header carrying the service API key used to read the target model's
