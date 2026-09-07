@@ -47,9 +47,14 @@ docker run -d -e OPENWEBUI_BASE_URL=http://host.docker.internal:3000 -e PORT=800
 ## Pull the published image
 
 ```bash
-docker pull ghcr.io/baronco/owui_agents:v0.1.0
-docker run -d --env-file .env -e PORT=8000 -p 8000:8000 ghcr.io/baronco/owui_agents:v0.1.0
+docker pull ghcr.io/baronco/owui_agents:latest
+docker run -d --restart unless-stopped -e OPENWEBUI_BASE_URL=http://host.docker.internal:3000 -e PORT=8000 -p 8000:8000 --name owui_agents ghcr.io/baronco/owui_agents:latest
 ```
+
+> **Important:** use the full image name (`ghcr.io/baronco/owui_agents:v0.1.0`) in
+> `docker run`. The short name `owui_agents` only exists if you built the image
+> locally with `docker build -t owui_agents .` — otherwise Docker fails with
+> `pull access denied for owui_agents, repository does not exist`.
 
 Consumers that only pull the published image just set `OPENWEBUI_BASE_URL` (and `PORT`)
 manually — no additional local files are required. The container runs as a non-root `app` user.
