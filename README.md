@@ -1,21 +1,44 @@
 # owui_agents
 
-Lets a parent agent delegate work to sub-agents in Open WebUI through a single HTTP call:
-you send a message and the target sub-agent (`model_id`), and you get back the answer plus the
-session id to continue the conversation later. It solves auth passthrough, per-model tool
-resolution, and session tracking, so the parent agent doesn't have to handle any of that.
+Lets a parent agent delegate work to sub-agents in Open WebUI through a single HTTP endpoint:
+send one task or several, and get back each answer plus the session id to continue the
+conversation later. It solves auth passthrough, per-model tool resolution, and session tracking,
+so the parent agent doesn't have to handle any of that.
+
+The proxy exposes one tool operation, `sub_agents` (`POST /proxy/chat/batch`). A single task is
+just a batch of one.
 
 ## Environment variables
 
-Only one value is needed (see `.env.example`):
+See `.env.example`:
 
 | Variable | Description |
 |----------|-------------|
 | `OPENWEBUI_BASE_URL` | Open WebUI instance the proxy talks to. Inside a container this must NOT be `localhost` — use `http://host.docker.internal:3000` or a service name on a shared Docker network. |
 | `PORT` | **Required.** Port the container listens on (e.g. `8000`). The app will not start without it — always set it explicitly: `-e PORT=...`, `.env`, or the cloud platform's env settings. |
+| `MAX_BATCH_SUBAGENTS` | Optional, default `5`. Maximum number of sub-agents run concurrently by `POST /proxy/chat/batch`. Trailing tasks beyond this limit are dropped and reported in the response `info` field. Must be a positive integer. |
 
 The caller bearer and the sub-agent tools key travel per request in the `Authorization` and
 `X-Subagent-Tools-Key` headers — never in env.
+
+## Make targets
+
+Requires GNU Make (works with `cmd.exe` on Windows and `/bin/sh` on Unix).
+
+```bash
+make help                                          # list all commands
+make release VERSION=v0.1.1                        # docker build + push of the versioned image
+make release VERSION=v0.1.1 LATEST=true            # also tag and push :latest
+make build VERSION=v0.1.1                          # only build the versioned image locally
+make up                                            # start the local stack (compose up -d --build)
+make down                                          # stop and remove the local stack
+make logs / make ps / make restart                 # follow logs / status / restart
+```
+
+- `VERSION` is **mandatory** for `release` and `build`: without it the target aborts before
+  running any command.
+- `LATEST` accepts `true`, `1`, or `yes` (default `false`) and only affects `release`.
+- Override the image with `IMAGE=...` (default `ghcr.io/baronco/owui_agents`).
 
 ## Deploy locally with docker compose
 
@@ -51,7 +74,7 @@ docker pull ghcr.io/baronco/owui_agents:latest
 docker run -d --restart unless-stopped -e OPENWEBUI_BASE_URL=http://host.docker.internal:3000 -e PORT=8000 -p 8000:8000 --name owui_agents ghcr.io/baronco/owui_agents:latest
 ```
 
-> **Important:** use the full image name (`ghcr.io/baronco/owui_agents:v0.1.0`) in
+> **Important:** use the full image name (`ghcr.io/baronco/owui_agents:v0.1.1`) in
 > `docker run`. The short name `owui_agents` only exists if you built the image
 > locally with `docker build -t owui_agents .` — otherwise Docker fails with
 > `pull access denied for owui_agents, repository does not exist`.
@@ -74,6 +97,40 @@ Register the proxy as an OpenAPI tool connection pointing at its `/openapi.json`
 For that key, create a dedicated user group in Open WebUI with an admin user that has API-key
 creation enabled for the group's permissions, and use a key from that account. That key is what
 goes in the `X-Subagent-Tools-Key` header.
+
+## Batch endpoint: several sub-agents in parallel
+
+`POST /proxy/chat/batch` runs a list of independent sub-agent tasks **concurrently** in a single
+call, so wall time is close to the slowest task instead of the sum. It exists because Open WebUI
+executes regular tool calls one by one; batching is how the parent agent gets parallelism.
+
+```bash
+curl -sS -X POST http://localhost:8000/proxy/chat/batch \
+  -H "Authorization: Bearer <user-jwt>" \
+  -H "X-Subagent-Tools-Key: <service-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tasks": [
+      {"message": "TRM rate for August 2026", "model_id": "web-search-subagent"},
+      {"message": "Generate an XLSX with the rates", "model_id": "gen-files-subagent"}
+    ]
+  }'
+```
+
+- Each task is `{message, model_id, chat_id?}`; `chat_id` continues an existing sub-agent session.
+- The response returns one result per task, in the same order, with `assistant_response`,
+  `subagent_chat_id`, and a per-task `status` (`ok`/`error`). One failing task never loses the
+  others.
+- `MAX_BATCH_SUBAGENTS` (default `5`) caps how many run. If more tasks are sent, the trailing ones
+  are dropped and the response carries `truncated_count` and an `info` note naming them. The cap is
+  also stated in the endpoint's OpenAPI description, so an agent reading the connection as a tool
+  knows the limit.
+- When Open WebUI forwards `X-OpenWebUI-Chat-Id` / `X-OpenWebUI-Message-Id` (with
+  `ENABLE_FORWARD_USER_INFO_HEADERS=True`), the endpoint emits live **status events** per
+  sub-agent to the originating chat: `"{emoji} <model> is thinking…"` at start, intermediate
+  `"is using <tool>…"` / tool statuses forwarded from the sub-agent's stream, and a
+  `"has finished"` / `"failed"` at the end. Emojis are picked at random from a task-relevant
+  pool (search, files, images, code).
 
 ## Example: main agent with two sub-agents
 
