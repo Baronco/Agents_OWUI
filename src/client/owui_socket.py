@@ -14,8 +14,9 @@ Protocol (from the OWUI frontend + backend):
   where ``data = {type, data}``; ``type == 'chat:completion'`` carries
   ``{done, content, output, choices}`` (open-webui Chat.svelte chatEventHandler).
 """
+
 from contextlib import contextmanager
-from typing import Iterator, Optional, Tuple
+from typing import Callable, Iterator, Optional, Tuple
 import threading
 
 import socketio
@@ -65,8 +66,13 @@ class _CompletionState:
         self.sid: Optional[str] = None
 
 
-def _make_client(assistant_msg_id: str, state: "_CompletionState") -> socketio.Client:
+def _make_client(
+    assistant_msg_id: str,
+    state: "_CompletionState",
+    on_progress: Optional[Callable[[dict], None]] = None,
+) -> socketio.Client:
     sio = socketio.Client(reconnection=False, logger=False, engineio_logger=False)
+    seen_tools: set = set()
 
     @sio.on("events")
     def _on_events(ev):  # noqa: ANN001 — socketio handler
@@ -88,12 +94,18 @@ def _make_client(assistant_msg_id: str, state: "_CompletionState") -> socketio.C
                         or ""
                     )
                     state.content += piece
+                for tool_name in _iter_tool_names_from_choices(data.get("choices")):
+                    _notify_tool(on_progress, seen_tools, tool_name)
                 if data.get("output") is not None:
                     state.output = data["output"]
+                    for tool_name in _iter_tool_names_from_output(data["output"]):
+                        _notify_tool(on_progress, seen_tools, tool_name)
                 if data.get("done"):
                     if not state.content and data.get("output") is not None:
                         state.content = _extract_text_from_output(data["output"])
                     state.done.set()
+            elif etype == "status":
+                _notify_progress(on_progress, {"type": "status", "data": data})
             elif etype in ("message", "chat:message:delta"):
                 state.content += data.get("content", "") or ""
             elif etype in ("replace", "chat:message"):
@@ -107,21 +119,74 @@ def _make_client(assistant_msg_id: str, state: "_CompletionState") -> socketio.C
     return sio
 
 
+def _notify_progress(on_progress: Optional[Callable[[dict], None]], event: dict) -> None:
+    """Invoke the progress callback, swallowing any error (best-effort)."""
+    if on_progress is None:
+        return
+    try:
+        on_progress(event)
+    except Exception as exc:
+        logger.debug("progress callback error: %s", exc)
+
+
+def _notify_tool(
+    on_progress: Optional[Callable[[dict], None]], seen_tools: set, tool_name: str
+) -> None:
+    """Notify a tool use once per unique tool name."""
+    if not tool_name or tool_name in seen_tools:
+        return
+    seen_tools.add(tool_name)
+    _notify_progress(on_progress, {"type": "tool", "name": tool_name})
+
+
+def _iter_tool_names_from_choices(choices) -> Iterator[str]:
+    """Yield tool names found in OpenAI-style streaming choices."""
+    if not isinstance(choices, list):
+        return
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        for holder in (choice.get("delta") or {}, choice.get("message") or {}):
+            for call in holder.get("tool_calls") or []:
+                name = ((call or {}).get("function") or {}).get("name")
+                if name:
+                    yield name
+
+
+def _iter_tool_names_from_output(output) -> Iterator[str]:
+    """Yield tool names found in the 0.10.2 output array function_call items."""
+    if not isinstance(output, list):
+        return
+    for item in output:
+        if isinstance(item, dict) and item.get("type") == "function_call":
+            name = item.get("name")
+            if name:
+                yield name
+
+
 @contextmanager
-def completion_listener(base_url: str, token: str, assistant_msg_id: str) -> Iterator[_CompletionState]:
+def completion_listener(
+    base_url: str,
+    token: str,
+    assistant_msg_id: str,
+    on_progress: Optional[Callable[[dict], None]] = None,
+) -> Iterator[_CompletionState]:
     """Connect to OWUI's socket, listen for the assistant message's completion.
 
     OWUI's socket server accepts a single transport — ``websocket`` when
     ENABLE_WEBSOCKET_SUPPORT is on, else ``polling`` — so try websocket first and
     fall back to polling. Yields a state object; the caller triggers the HTTP
     completion (using ``state.sid`` as session_id) and waits on ``state.done``.
+
+    ``on_progress`` receives normalized ``{"type": "status"|"tool", ...}`` events
+    so the caller can surface live per-tool progress.
     """
     state = _CompletionState()
     connect_url = _ipv4(base_url)
     sio = None
     last_err: Optional[Exception] = None
     for transport in (["websocket"], ["polling"]):
-        candidate = _make_client(assistant_msg_id, state)
+        candidate = _make_client(assistant_msg_id, state, on_progress)
         try:
             candidate.connect(
                 connect_url,
@@ -131,7 +196,9 @@ def completion_listener(base_url: str, token: str, assistant_msg_id: str) -> Ite
                 wait_timeout=_CONNECT_TIMEOUT_S,
             )
             sio = candidate
-            logger.info("Socket connected to OWUI (transport=%s, sid=%s)", transport[0], candidate.sid)
+            logger.info(
+                "Socket connected to OWUI (transport=%s, sid=%s)", transport[0], candidate.sid
+            )
             break
         except Exception as exc:
             last_err = exc
@@ -160,13 +227,14 @@ def await_completion(
     assistant_msg_id: str,
     trigger,
     timeout: float,
+    on_progress: Optional[Callable[[dict], None]] = None,
 ) -> Tuple[Optional[str], str, object]:
     """Run the full socket round-trip.
 
     ``trigger(session_id)`` must POST the completion and return the ack dict
     (containing ``chat_id`` for new chats). Returns ``(chat_id, content, output)``.
     """
-    with completion_listener(base_url, token, assistant_msg_id) as state:
+    with completion_listener(base_url, token, assistant_msg_id, on_progress) as state:
         ack = trigger(state.sid) or {}
         chat_id = ack.get("chat_id") or ack.get("id")
         if not state.done.wait(timeout=timeout):

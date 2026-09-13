@@ -5,6 +5,7 @@ Tests cover:
 - _on_events handler: sets state.content from done event in 0.10.2 format
 - Debug logging: logger.debug called for matched events (US2)
 """
+
 import threading
 from unittest.mock import patch, MagicMock
 
@@ -14,6 +15,7 @@ from src.client.owui_socket import _extract_text_from_output, _CompletionState, 
 # ---------------------------------------------------------------------------
 # T002 — _extract_text_from_output
 # ---------------------------------------------------------------------------
+
 
 def _msg_item(text: str, status: str = "completed") -> dict:
     return {
@@ -26,12 +28,23 @@ def _msg_item(text: str, status: str = "completed") -> dict:
 
 
 def _fc_item(name: str = "search_catalog") -> dict:
-    return {"type": "function_call", "id": "fc_001", "call_id": "fc_001", "name": name, "status": "completed"}
+    return {
+        "type": "function_call",
+        "id": "fc_001",
+        "call_id": "fc_001",
+        "name": name,
+        "status": "completed",
+    }
 
 
 def _fco_item() -> dict:
-    return {"type": "function_call_output", "id": "fco_001", "call_id": "fc_001",
-            "output": [{"type": "input_text", "text": "[]"}], "status": "completed"}
+    return {
+        "type": "function_call_output",
+        "id": "fco_001",
+        "call_id": "fc_001",
+        "output": [{"type": "input_text", "text": "[]"}],
+        "status": "completed",
+    }
 
 
 def test_extract_simple_message():
@@ -70,7 +83,13 @@ def test_extract_message_item_with_empty_text():
 
 
 def test_extract_skips_non_assistant_message_items():
-    output = [{"type": "message", "role": "user", "content": [{"type": "output_text", "text": "user msg"}]}]
+    output = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "output_text", "text": "user msg"}],
+        }
+    ]
     assert _extract_text_from_output(output) == ""
 
 
@@ -82,6 +101,7 @@ def test_extract_only_tool_call_items():
 # ---------------------------------------------------------------------------
 # T003 — _on_events sets state.content from 0.10.2 done event
 # ---------------------------------------------------------------------------
+
 
 def _make_state_and_handler(msg_id: str):
     """Create a _CompletionState and extract the _on_events handler from a real sio client."""
@@ -103,11 +123,15 @@ def test_on_events_sets_content_from_0102_done_event():
     msg_id = "test-msg-001"
     state, handler = _make_state_and_handler(msg_id)
 
-    done_event = _wrap_event(msg_id, "chat:completion", {
-        "done": True,
-        "output": [_msg_item("Tenemos varias lámparas disponibles.")],
-        "title": "Test chat",
-    })
+    done_event = _wrap_event(
+        msg_id,
+        "chat:completion",
+        {
+            "done": True,
+            "output": [_msg_item("Tenemos varias lámparas disponibles.")],
+            "title": "Test chat",
+        },
+    )
     handler(done_event)
 
     assert state.done.is_set()
@@ -119,11 +143,15 @@ def test_on_events_sets_content_from_0102_done_event_with_tools():
     msg_id = "test-msg-002"
     state, handler = _make_state_and_handler(msg_id)
 
-    done_event = _wrap_event(msg_id, "chat:completion", {
-        "done": True,
-        "output": [_fc_item(), _fco_item(), _msg_item("Estos son los productos encontrados.")],
-        "title": "Test chat",
-    })
+    done_event = _wrap_event(
+        msg_id,
+        "chat:completion",
+        {
+            "done": True,
+            "output": [_fc_item(), _fco_item(), _msg_item("Estos son los productos encontrados.")],
+            "title": "Test chat",
+        },
+    )
     handler(done_event)
 
     assert state.done.is_set()
@@ -135,10 +163,14 @@ def test_on_events_preserves_094_done_path():
     msg_id = "test-msg-003"
     state, handler = _make_state_and_handler(msg_id)
 
-    done_event = _wrap_event(msg_id, "chat:completion", {
-        "done": True,
-        "content": "Respuesta en formato antiguo.",
-    })
+    done_event = _wrap_event(
+        msg_id,
+        "chat:completion",
+        {
+            "done": True,
+            "content": "Respuesta en formato antiguo.",
+        },
+    )
     handler(done_event)
 
     assert state.done.is_set()
@@ -153,11 +185,15 @@ def test_on_events_0102_done_with_existing_content_not_overwritten():
     # Simulate content already set from a previous replace event
     state.content = "Ya tenía contenido."
 
-    done_event = _wrap_event(msg_id, "chat:completion", {
-        "done": True,
-        "output": [_msg_item("Otro texto.")],
-        "title": "Test chat",
-    })
+    done_event = _wrap_event(
+        msg_id,
+        "chat:completion",
+        {
+            "done": True,
+            "output": [_msg_item("Otro texto.")],
+            "title": "Test chat",
+        },
+    )
     handler(done_event)
 
     assert state.done.is_set()
@@ -170,10 +206,14 @@ def test_on_events_ignores_wrong_message_id():
     msg_id = "test-msg-005"
     state, handler = _make_state_and_handler(msg_id)
 
-    wrong_event = _wrap_event("OTHER-MSG-ID", "chat:completion", {
-        "done": True,
-        "content": "should be ignored",
-    })
+    wrong_event = _wrap_event(
+        "OTHER-MSG-ID",
+        "chat:completion",
+        {
+            "done": True,
+            "content": "should be ignored",
+        },
+    )
     handler(wrong_event)
 
     assert not state.done.is_set()
@@ -183,6 +223,7 @@ def test_on_events_ignores_wrong_message_id():
 # ---------------------------------------------------------------------------
 # T007 — US2: debug logging
 # ---------------------------------------------------------------------------
+
 
 def test_on_events_debug_logged_for_matched_event():
     """logger.debug must be called with the raw event when message_id matches."""
@@ -196,8 +237,10 @@ def test_on_events_debug_logged_for_matched_event():
         mock_logger.debug.assert_called()
         # Verify the raw event dict appears in the call args
         call_args = mock_logger.debug.call_args
-        assert ev in call_args.args or ev in call_args.kwargs.values() or any(
-            ev == a for a in call_args.args
+        assert (
+            ev in call_args.args
+            or ev in call_args.kwargs.values()
+            or any(ev == a for a in call_args.args)
         )
 
 
@@ -211,3 +254,75 @@ def test_on_events_debug_not_logged_for_unmatched_event():
     with patch("src.client.owui_socket.logger") as mock_logger:
         handler(ev)
         mock_logger.debug.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Progress events (spec 020, US3)
+# ---------------------------------------------------------------------------
+
+
+def _make_state_and_handler_with_progress(msg_id: str, on_progress):
+    state = _CompletionState()
+    sio = _make_client(msg_id, state, on_progress)
+    return state, sio.handlers["/"]["events"]
+
+
+def test_status_event_is_forwarded_to_progress():
+    """OWUI status events are surfaced as {'type': 'status', 'data': ...}."""
+    events = []
+    msg_id = "prog-msg-001"
+    _, handler = _make_state_and_handler_with_progress(msg_id, events.append)
+
+    payload = {"action": "web_search", "description": "Searching the web", "done": False}
+    handler(_wrap_event(msg_id, "status", payload))
+
+    assert events == [{"type": "status", "data": payload}]
+
+
+def test_tool_call_in_choices_is_forwarded_once():
+    """A tool call in a streaming delta yields one tool event (deduplicated)."""
+    events = []
+    msg_id = "prog-msg-002"
+    _, handler = _make_state_and_handler_with_progress(msg_id, events.append)
+
+    ev = _wrap_event(
+        msg_id,
+        "chat:completion",
+        {"choices": [{"delta": {"tool_calls": [{"function": {"name": "web_search"}}]}}]},
+    )
+    handler(ev)
+    handler(ev)
+
+    assert events == [{"type": "tool", "name": "web_search"}]
+
+
+def test_tool_call_in_output_is_forwarded():
+    """A function_call item in the output array yields a tool event."""
+    events = []
+    msg_id = "prog-msg-003"
+    _, handler = _make_state_and_handler_with_progress(msg_id, events.append)
+
+    handler(
+        _wrap_event(
+            msg_id,
+            "chat:completion",
+            {"done": True, "output": [{"type": "function_call", "name": "gen_files"}]},
+        )
+    )
+
+    assert {"type": "tool", "name": "gen_files"} in events
+
+
+def test_progress_callback_error_does_not_break_handler():
+    """A raising progress callback must not break completion handling."""
+
+    def boom(_event):
+        raise RuntimeError("nope")
+
+    msg_id = "prog-msg-004"
+    state, handler = _make_state_and_handler_with_progress(msg_id, boom)
+
+    handler(_wrap_event(msg_id, "status", {"description": "x"}))
+    handler(_wrap_event(msg_id, "chat:completion", {"done": True, "content": "ok"}))
+
+    assert state.content == "ok"
