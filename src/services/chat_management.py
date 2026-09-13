@@ -14,7 +14,8 @@ Tools run on the Open WebUI side. The proxy replicates the OWUI frontend:
 
 See specs/005-reduce-api-latency/research.md (Finding 3) and src/client/owui_socket.py.
 """
-from typing import Dict, Optional, TypedDict
+
+from typing import Callable, Dict, Optional, TypedDict
 from contextlib import nullcontext
 import uuid
 import time
@@ -36,7 +37,8 @@ class TenantConfig(TypedDict, total=False):
     tool_ids: list[str]
     title_generation: bool
 
-_DETAILS_BLOCK_RE = re.compile(r'<details[^>]*>.*?</details>', re.DOTALL)
+
+_DETAILS_BLOCK_RE = re.compile(r"<details[^>]*>.*?</details>", re.DOTALL)
 
 # Max time to wait for OWUI's async (socket-delivered) completion.
 _RESULT_TIMEOUT_S = 180
@@ -44,7 +46,7 @@ _RESULT_TIMEOUT_S = 180
 
 def _strip_details_blocks(content: str) -> str:
     """Remove OWUI tool-trace <details> blocks for the widget-facing answer."""
-    return _DETAILS_BLOCK_RE.sub('', content).strip()
+    return _DETAILS_BLOCK_RE.sub("", content).strip()
 
 
 def _rest_content_fallback(c: OpenWebUIClient, chat_id: str) -> str:
@@ -68,7 +70,7 @@ def _rest_content_fallback(c: OpenWebUIClient, chat_id: str) -> str:
 
 def _bearer(c: OpenWebUIClient) -> str:
     h = c.session.headers.get("Authorization", "") or ""
-    return h[len("Bearer "):] if h.startswith("Bearer ") else h
+    return h[len("Bearer ") :] if h.startswith("Bearer ") else h
 
 
 def _walk_history_chain(history_messages: dict, tip_id: str) -> list:
@@ -122,7 +124,8 @@ def _completion_payload(
             "memory": False,
         },
         "background_tasks": {
-            "title_generation": title_generation_enabled and bool(parent_id is None and not chat_id),
+            "title_generation": title_generation_enabled
+            and bool(parent_id is None and not chat_id),
             "tags_generation": False,
             "follow_up_generation": False,
         },
@@ -136,6 +139,7 @@ def _completion_payload(
 # Chat lifecycle
 # ---------------------------------------------------------------------------
 
+
 def get_or_create_chat(
     user_id: str,
     assistant_id: str,
@@ -143,6 +147,7 @@ def get_or_create_chat(
     tenant_config: Optional[TenantConfig] = None,
     owui_client: Optional[OpenWebUIClient] = None,
     timing: Optional[RequestTiming] = None,
+    on_progress: Optional[Callable[[dict], None]] = None,
 ) -> Optional[Dict[str, str]]:
     """Start a new chat. OWUI creates+links it, runs tools, and persists."""
     c = owui_client
@@ -166,15 +171,27 @@ def get_or_create_chat(
 
         def trigger(session_id):
             payload = _completion_payload(
-                model, [{"role": "user", "content": message_content}],
-                chat_id=None, parent_id=None, user_message=user_message,
-                assistant_msg_id=assistant_msg_id, session_id=session_id, tool_ids=tool_ids,
+                model,
+                [{"role": "user", "content": message_content}],
+                chat_id=None,
+                parent_id=None,
+                user_message=user_message,
+                assistant_msg_id=assistant_msg_id,
+                session_id=session_id,
+                tool_ids=tool_ids,
                 title_generation_enabled=title_generation_enabled,
             )
             return c.chat_completion(payload)
 
         def run():
-            return await_completion(c.base_url, _bearer(c), assistant_msg_id, trigger, _RESULT_TIMEOUT_S)
+            return await_completion(
+                c.base_url,
+                _bearer(c),
+                assistant_msg_id,
+                trigger,
+                _RESULT_TIMEOUT_S,
+                on_progress=on_progress,
+            )
 
         if timing is not None:
             with timing.phase("completion_ms"):
@@ -187,13 +204,17 @@ def get_or_create_chat(
             return None
 
         if not content:
-            logger.warning("socket returned empty content for chat %s — trying REST fallback", chat_id)
+            logger.warning(
+                "socket returned empty content for chat %s — trying REST fallback", chat_id
+            )
             try:
                 content = _rest_content_fallback(c, chat_id)
             except Exception as exc:
                 logger.error("REST fallback for chat %s failed: %s", chat_id, exc)
             if not content:
-                logger.error("socket and REST fallback both returned no content for chat %s", chat_id)
+                logger.error(
+                    "socket and REST fallback both returned no content for chat %s", chat_id
+                )
 
         logger.info("Created chat %s for user %s", chat_id, user_id)
         return {
@@ -218,6 +239,7 @@ def continue_chat(
     owui_client: Optional[OpenWebUIClient] = None,
     tenant_config: Optional[TenantConfig] = None,
     timing: Optional[RequestTiming] = None,
+    on_progress: Optional[Callable[[dict], None]] = None,
 ) -> Optional[Dict[str, str]]:
     """Continue an existing chat. OWUI appends+links, runs tools, and persists."""
     c = owui_client
@@ -263,14 +285,26 @@ def continue_chat(
 
         def trigger(session_id):
             payload = _completion_payload(
-                model, completion_msgs,
-                chat_id=chat_id, parent_id=last_id, user_message=user_message,
-                assistant_msg_id=assistant_msg_id, session_id=session_id, tool_ids=tool_ids,
+                model,
+                completion_msgs,
+                chat_id=chat_id,
+                parent_id=last_id,
+                user_message=user_message,
+                assistant_msg_id=assistant_msg_id,
+                session_id=session_id,
+                tool_ids=tool_ids,
             )
             return c.chat_completion(payload)
 
         def run():
-            return await_completion(c.base_url, _bearer(c), assistant_msg_id, trigger, _RESULT_TIMEOUT_S)
+            return await_completion(
+                c.base_url,
+                _bearer(c),
+                assistant_msg_id,
+                trigger,
+                _RESULT_TIMEOUT_S,
+                on_progress=on_progress,
+            )
 
         if timing is not None:
             with timing.phase("completion_ms"):
@@ -279,13 +313,17 @@ def continue_chat(
             _chat_id, content, output = run()
 
         if not content:
-            logger.warning("socket returned empty content for chat %s — trying REST fallback", chat_id)
+            logger.warning(
+                "socket returned empty content for chat %s — trying REST fallback", chat_id
+            )
             try:
                 content = _rest_content_fallback(c, chat_id)
             except Exception as exc:
                 logger.error("REST fallback for chat %s failed: %s", chat_id, exc)
             if not content:
-                logger.error("socket and REST fallback both returned no content for chat %s", chat_id)
+                logger.error(
+                    "socket and REST fallback both returned no content for chat %s", chat_id
+                )
 
         return {
             "chat_id": chat_id,
