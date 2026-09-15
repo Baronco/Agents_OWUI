@@ -12,6 +12,7 @@ import src.services.batch as batch
 
 def _patch_batch(monkeypatch):
     monkeypatch.setattr(proxy_api.client, "get_model_tool_ids", lambda *a, **k: [])
+    monkeypatch.setattr(proxy_api, "PROXY_AUTO_ARCHIVE", False)
 
     def fake_create(user_id, assistant_id, message, **kwargs):
         return {
@@ -99,6 +100,8 @@ def test_per_task_error_is_isolated(monkeypatch):
     """One failing task reports an error without losing the other results."""
     from src.client.openwebui_client import UnknownModelError
 
+    monkeypatch.setattr(proxy_api, "PROXY_AUTO_ARCHIVE", False)
+
     def lookup(model_id, token, **kwargs):
         if model_id == "bad":
             raise UnknownModelError("nope")
@@ -151,6 +154,7 @@ def test_blank_model_id_fails_that_task_only(monkeypatch):
 
 def test_task_with_chat_id_continues_chat(monkeypatch):
     """A task carrying a chat_id continues that session (no new chat created)."""
+    monkeypatch.setattr(proxy_api, "PROXY_AUTO_ARCHIVE", False)
     monkeypatch.setattr(proxy_api.client, "get_model_tool_ids", lambda *a, **k: [])
     calls = []
 
@@ -175,6 +179,7 @@ def test_task_with_chat_id_continues_chat(monkeypatch):
 
 def test_task_without_chat_id_creates_chat(monkeypatch):
     """A task without a chat_id creates a new sub-agent chat."""
+    monkeypatch.setattr(proxy_api, "PROXY_AUTO_ARCHIVE", False)
     monkeypatch.setattr(proxy_api.client, "get_model_tool_ids", lambda *a, **k: [])
     calls = []
 
@@ -199,6 +204,7 @@ def test_task_without_chat_id_creates_chat(monkeypatch):
 
 def test_bearer_reaches_owui_without_duplicate_prefix(monkeypatch):
     """The incoming 'Bearer <jwt>' header must reach OWUI as-is (no 'Bearer Bearer')."""
+    monkeypatch.setattr(proxy_api, "PROXY_AUTO_ARCHIVE", False)
     seen = {}
     monkeypatch.setattr(proxy_api.client, "get_model_tool_ids", lambda *a, **k: [])
 
@@ -218,6 +224,7 @@ def test_bearer_reaches_owui_without_duplicate_prefix(monkeypatch):
 
 def test_resolved_tool_ids_reach_chat_call(monkeypatch):
     """The resolved model tools reach the chat call as tenant_config.tool_ids."""
+    monkeypatch.setattr(proxy_api, "PROXY_AUTO_ARCHIVE", False)
     seen = {}
     monkeypatch.setattr(
         proxy_api.client, "get_model_tool_ids", lambda *a, **k: ["server:1", "chat_id"]
