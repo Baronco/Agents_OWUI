@@ -160,3 +160,45 @@ class OpenWebUIClient:
         self._check_auth(resp)
         resp.raise_for_status()
         return resp.json()
+
+    def archive_chat(self, chat_id: str, timeout: int = 10) -> bool:
+        """Archive a chat if it is not already archived (toggle-safe).
+
+        ``POST /api/v1/chats/{id}/archive`` is a toggle in Open WebUI, so we
+        first fetch the chat and only toggle when ``archived == False``.
+        Best-effort: network/auth errors are logged and return ``False``.
+        """
+        if not chat_id:
+            return False
+        try:
+            current = self.get_chat(chat_id)
+        except AuthExpiredError:
+            raise
+        except Exception as exc:
+            logger.debug("Archive check failed for chat %s: %s", chat_id, exc)
+            return False
+
+        # ChatModel: top-level archived, fallback to nested chat.archived
+        is_archived = current.get("archived")
+        if is_archived is None:
+            inner = self._chat_inner(current)
+            is_archived = inner.get("archived") if isinstance(inner, dict) else None
+        if is_archived:
+            logger.debug("Chat %s already archived — skip toggle", chat_id)
+            return True
+
+        url = f"{self.base_url}/api/v1/chats/{chat_id}/archive"
+        self.round_trips += 1
+        try:
+            resp = self.session.post(url, timeout=timeout)
+        except requests.RequestException as exc:
+            logger.warning("Archive POST failed for chat %s: %s", chat_id, exc)
+            return False
+        try:
+            self._check_auth(resp)
+        except AuthExpiredError:
+            raise
+        if resp.status_code >= 400:
+            logger.warning("Archive POST rejected for chat %s: HTTP %s", chat_id, resp.status_code)
+            return False
+        return True

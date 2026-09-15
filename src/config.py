@@ -38,3 +38,26 @@ MAX_BATCH_SUBAGENTS_DEFAULT = 5
 MAX_BATCH_SUBAGENTS = parse_positive_int(
     get_env("MAX_BATCH_SUBAGENTS", ""), MAX_BATCH_SUBAGENTS_DEFAULT
 )
+
+
+def parse_bool_env(raw: str, default: bool = False) -> bool:
+    """Parse ``raw`` as bool; accepts true/false, 1/0, yes/no (case-insensitive)."""
+    text = (raw or "").strip().lower()
+    if not text:
+        return default
+    if text in ("1", "true", "yes", "y", "on"):
+        return True
+    if text in ("0", "false", "no", "n", "off"):
+        return False
+    logger.warning("Invalid boolean value %r — falling back to %s", raw, default)
+    return default
+
+
+PROXY_AUTO_ARCHIVE = parse_bool_env(get_env("PROXY_AUTO_ARCHIVE", ""), True)
+
+# Guard against sub_agents tool loops: max calls per parent message_id.
+MAX_SUBAGENT_CALLS_PER_MESSAGE_DEFAULT = 5
+MAX_SUBAGENT_CALLS_PER_MESSAGE = parse_positive_int(
+    get_env("MAX_SUBAGENT_CALLS_PER_MESSAGE", ""),
+    MAX_SUBAGENT_CALLS_PER_MESSAGE_DEFAULT,
+)

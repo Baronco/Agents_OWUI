@@ -17,28 +17,10 @@ See `.env.example`:
 | `OPENWEBUI_BASE_URL` | Open WebUI instance the proxy talks to. Inside a container this must NOT be `localhost` — use `http://host.docker.internal:3000` or a service name on a shared Docker network. |
 | `PORT` | **Required.** Port the container listens on (e.g. `8000`). The app will not start without it — always set it explicitly: `-e PORT=...`, `.env`, or the cloud platform's env settings. |
 | `MAX_BATCH_SUBAGENTS` | Optional, default `5`. Maximum number of sub-agents run concurrently by `POST /proxy/chat/batch`. Trailing tasks beyond this limit are dropped and reported in the response `info` field. Must be a positive integer. |
+| `PROXY_AUTO_ARCHIVE` | Optional, default `true`. When `true`, each sub-agent chat created via `POST /proxy/chat/batch` is archived after its generation finishes (still continuable via `chat_id` but hidden from the main list). Overridable per request with `{"archive": true/false}`. |
 
 The caller bearer and the sub-agent tools key travel per request in the `Authorization` and
 `X-Subagent-Tools-Key` headers — never in env.
-
-## Make targets
-
-Requires GNU Make (works with `cmd.exe` on Windows and `/bin/sh` on Unix).
-
-```bash
-make help                                          # list all commands
-make release VERSION=v0.1.1                        # docker build + push of the versioned image
-make release VERSION=v0.1.1 LATEST=true            # also tag and push :latest
-make build VERSION=v0.1.1                          # only build the versioned image locally
-make up                                            # start the local stack (compose up -d --build)
-make down                                          # stop and remove the local stack
-make logs / make ps / make restart                 # follow logs / status / restart
-```
-
-- `VERSION` is **mandatory** for `release` and `build`: without it the target aborts before
-  running any command.
-- `LATEST` accepts `true`, `1`, or `yes` (default `false`) and only affects `release`.
-- Override the image with `IMAGE=...` (default `ghcr.io/baronco/owui_agents`).
 
 ## Deploy locally with docker compose
 
@@ -74,7 +56,7 @@ docker pull ghcr.io/baronco/owui_agents:latest
 docker run -d --restart unless-stopped -e OPENWEBUI_BASE_URL=http://host.docker.internal:3000 -e PORT=8000 -p 8000:8000 --name owui_agents ghcr.io/baronco/owui_agents:latest
 ```
 
-> **Important:** use the full image name (`ghcr.io/baronco/owui_agents:v0.1.1`) in
+> **Important:** use the full image name (`ghcr.io/baronco/owui_agents:v0.1.2`) in
 > `docker run`. The short name `owui_agents` only exists if you built the image
 > locally with `docker build -t owui_agents .` — otherwise Docker fails with
 > `pull access denied for owui_agents, repository does not exist`.
@@ -125,6 +107,7 @@ curl -sS -X POST http://localhost:8000/proxy/chat/batch \
   are dropped and the response carries `truncated_count` and an `info` note naming them. The cap is
   also stated in the endpoint's OpenAPI description, so an agent reading the connection as a tool
   knows the limit.
+- By default sub-agent chats are **archived** after completion (`PROXY_AUTO_ARCHIVE=true`, so they disappear from the main list but stay continuable). Send `{"archive": false}` to keep them visible, or set `PROXY_AUTO_ARCHIVE=false` to invert the default.
 - When Open WebUI forwards `X-OpenWebUI-Chat-Id` / `X-OpenWebUI-Message-Id` (with
   `ENABLE_FORWARD_USER_INFO_HEADERS=True`), the endpoint emits live **status events** per
   sub-agent to the originating chat: `"{emoji} <model> is thinking…"` at start, intermediate

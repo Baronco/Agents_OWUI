@@ -8,6 +8,7 @@ import src.services.batch as batch
 
 def _patch(monkeypatch):
     monkeypatch.setattr(proxy_api.client, "get_model_tool_ids", lambda *a, **k: [])
+    monkeypatch.setattr(proxy_api, "PROXY_AUTO_ARCHIVE", False)
 
     def fake_create(user_id, assistant_id, message, **kwargs):
         return {"chat_id": f"c-{assistant_id}", "assistant_response": "ok"}

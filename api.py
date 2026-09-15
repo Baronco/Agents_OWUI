@@ -8,15 +8,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import random
+import threading
+import time
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from src.client.openwebui_client import OpenWebUIClient
+from src.client.openwebui_client import AuthExpiredError, OpenWebUIClient
 from src.client.owui_events import emit_status
-from src.config import MAX_BATCH_SUBAGENTS, OPENWEBUI_BASE_URL
+from src.config import (
+    MAX_BATCH_SUBAGENTS,
+    MAX_SUBAGENT_CALLS_PER_MESSAGE,
+    OPENWEBUI_BASE_URL,
+    PROXY_AUTO_ARCHIVE,
+)
 from src.services import progress
 from src.services.batch import (
     BatchTaskOutcome,
@@ -112,6 +118,14 @@ class BatchChatRequest(BaseModel):
     """Tool-facing payload for ``POST /proxy/chat/batch``."""
 
     tasks: list[BatchTask] = Field(default_factory=list)
+    archive: bool | None = Field(
+        default=None,
+        description=(
+            "Archive each sub-agent chat after completion "
+            "(hidden from main list, still continuable). "
+            "Defaults to PROXY_AUTO_ARCHIVE."
+        ),
+    )
 
 
 class BatchTaskResult(BaseModel):
@@ -139,6 +153,37 @@ _FORWARDED_CHAT_ID_HEADER = "X-OpenWebUI-Chat-Id"
 _FORWARDED_MESSAGE_ID_HEADER = "X-OpenWebUI-Message-Id"
 
 _BATCH_TOOL_DESCRIPTION = build_batch_description(MAX_BATCH_SUBAGENTS)
+
+# Loop guard: count sub_agents calls per parent message_id (in-memory, TTL 10 min).
+_LOOP_COUNTS: dict[str, tuple[int, float]] = {}
+_LOOP_LOCK = threading.Lock()
+_LOOP_TTL_S = 600.0
+
+
+def _check_loop_guard(message_id: str | None) -> tuple[bool, str | None]:
+    """Return (allowed, guard_info). Increments counter; blocks after limit."""
+    if not message_id:
+        return True, None
+    now = time.monotonic()
+    with _LOOP_LOCK:
+        # Expire old entries
+        expired = [k for k, (_, ts) in _LOOP_COUNTS.items() if now - ts > _LOOP_TTL_S]
+        for k in expired:
+            _LOOP_COUNTS.pop(k, None)
+        count, first_ts = _LOOP_COUNTS.get(message_id, (0, now))
+        # First call for this id keeps first_ts
+        if message_id not in _LOOP_COUNTS:
+            first_ts = now
+        count += 1
+        _LOOP_COUNTS[message_id] = (count, first_ts)
+        if count > MAX_SUBAGENT_CALLS_PER_MESSAGE:
+            info = (
+                f"Loop guard: sub_agents called {count} times for this message "
+                f"(limit {MAX_SUBAGENT_CALLS_PER_MESSAGE}). Further calls blocked — "
+                "reuse previous file links instead of retrying."
+            )
+            return False, info
+    return True, None
 
 
 def _require_bearer(http_request: Request) -> str:
@@ -176,17 +221,17 @@ def _emit_task_progress(
     total: int,
     done: bool,
     error: str | None = None,
+    elapsed_s: float | None = None,
 ) -> None:
     """Emit one best-effort start/completion status event for a batch task (US3)."""
     if not chat_id or not message_id:
         return
     model_id = (spec.model_id or "sub-agent").strip() or "sub-agent"
-    pool = progress.task_emoji_pool(spec.model_id, spec.message)
     if done:
         emoji = progress.finish_emoji(error)
-        description = progress.finish_message(model_id, index, total, error, emoji)
+        description = progress.finish_message(model_id, index, total, error, emoji, elapsed_s)
     else:
-        description = progress.start_message(model_id, index, total, random.choice(pool))
+        description = progress.start_message(model_id, index, total, "🤖", spec.message)
     emit_status(
         OPENWEBUI_BASE_URL,
         bearer,
@@ -205,18 +250,22 @@ def _make_progress_emitter(
     """Return a per-task callback for intermediate sub-agent progress, or None.
 
     The callback receives normalized socket events and forwards them to the
-    originating chat as ``status`` events (best-effort).
+    originating chat as ``status`` events (best-effort). Duplicates within 1.2s
+    are throttled. Uniform emojis per spec: 🔨 for tool/status.
     """
     if not chat_id or not message_id:
         return None
     model_id = (spec.model_id or "sub-agent").strip() or "sub-agent"
-    pool = progress.task_emoji_pool(spec.model_id, spec.message)
+    last_emit: dict[str, float] = {}
 
     def emit(event: dict) -> None:
         if event.get("type") == "tool":
-            description = progress.tool_message(
-                model_id, event.get("name") or "a tool", random.choice(pool)
-            )
+            key = f"tool:{event.get('name')}"
+            now = time.monotonic()
+            if key in last_emit and now - last_emit[key] < 1.2:
+                return
+            last_emit[key] = now
+            description = progress.tool_message(model_id, event.get("name") or "a tool", "🔨")
         else:
             data = event.get("data") or {}
             if data.get("hidden"):
@@ -224,7 +273,12 @@ def _make_progress_emitter(
             detail = (data.get("description") or "").strip()
             if not detail:
                 return
-            description = progress.status_message(model_id, detail, random.choice(pool))
+            key = f"status:{detail}"
+            now = time.monotonic()
+            if key in last_emit and now - last_emit[key] < 1.2:
+                return
+            last_emit[key] = now
+            description = progress.status_message(model_id, detail, "🔨")
         emit_status(
             OPENWEBUI_BASE_URL,
             bearer,
@@ -260,16 +314,56 @@ def proxy_chat_batch(payload: BatchChatRequest, http_request: Request):
     bearer = _require_bearer(http_request)
     tools_key = _require_tools_key(http_request)
 
-    kept, dropped = truncate_tasks(payload.tasks, MAX_BATCH_SUBAGENTS)
     forwarded_chat_id = http_request.headers.get(_FORWARDED_CHAT_ID_HEADER)
     forwarded_message_id = http_request.headers.get(_FORWARDED_MESSAGE_ID_HEADER)
 
+    allowed, guard_info = _check_loop_guard(forwarded_message_id)
+    if not allowed:
+        logger.warning("Loop guard blocked sub_agents for message %s", forwarded_message_id)
+        # Still emit a visible guard event so the user sees why it stopped
+        if forwarded_chat_id and forwarded_message_id:
+            emit_status(
+                OPENWEBUI_BASE_URL,
+                bearer,
+                forwarded_chat_id,
+                forwarded_message_id,
+                {"description": f"⛔ {guard_info}", "done": False},
+            )
+        return BatchChatResponse(
+            results=[],
+            max_subagents=MAX_BATCH_SUBAGENTS,
+            truncated_count=0,
+            info=guard_info,
+        )
+
+    kept, dropped = truncate_tasks(payload.tasks, MAX_BATCH_SUBAGENTS)
+
+    batch_start = time.monotonic()
+    task_start_times: dict[int, float] = {}
+    progress_lock = threading.Lock()
+    completed = [0]
+
+    # Batch wrapper — gives the user an immediate overview
+    if forwarded_chat_id and forwarded_message_id and kept:
+        emit_status(
+            OPENWEBUI_BASE_URL,
+            bearer,
+            forwarded_chat_id,
+            forwarded_message_id,
+            {"description": progress.batch_start_message(len(kept)), "done": False},
+        )
+
     def on_start(index: int, total: int, spec: BatchTask) -> None:
+        task_start_times[index] = time.monotonic()
         _emit_task_progress(
             bearer, forwarded_chat_id, forwarded_message_id, spec, index, total, done=False
         )
 
     def on_end(index: int, total: int, spec: BatchTask, outcome: BatchTaskOutcome) -> None:
+        elapsed = None
+        started = task_start_times.get(index)
+        if started is not None:
+            elapsed = time.monotonic() - started
         _emit_task_progress(
             bearer,
             forwarded_chat_id,
@@ -279,7 +373,23 @@ def proxy_chat_batch(payload: BatchChatRequest, http_request: Request):
             total,
             done=True,
             error=outcome.error,
+            elapsed_s=elapsed,
         )
+        # Uniform progress heartbeat after each task
+        if forwarded_chat_id and forwarded_message_id:
+            with progress_lock:
+                completed[0] += 1
+                # Throttle not needed here — one per finish is enough
+                emit_status(
+                    OPENWEBUI_BASE_URL,
+                    bearer,
+                    forwarded_chat_id,
+                    forwarded_message_id,
+                    {
+                        "description": progress.batch_progress_message(completed[0], total),
+                        "done": False,
+                    },
+                )
 
     def on_progress_factory(index: int, spec: BatchTask):
         return _make_progress_emitter(bearer, forwarded_chat_id, forwarded_message_id, spec)
@@ -301,6 +411,19 @@ def proxy_chat_batch(payload: BatchChatRequest, http_request: Request):
         on_progress_factory=on_progress_factory,
     )
 
+    if forwarded_chat_id and forwarded_message_id and kept:
+        batch_elapsed = time.monotonic() - batch_start
+        emit_status(
+            OPENWEBUI_BASE_URL,
+            bearer,
+            forwarded_chat_id,
+            forwarded_message_id,
+            {
+                "description": progress.batch_finish_message(len(kept), batch_elapsed),
+                "done": False,
+            },
+        )
+
     results = [
         BatchTaskResult(
             index=outcome.index,
@@ -313,6 +436,22 @@ def proxy_chat_batch(payload: BatchChatRequest, http_request: Request):
         for outcome in outcomes
     ]
     info = truncation_info(dropped, MAX_BATCH_SUBAGENTS) if dropped else None
+
+    # Archive each created sub-agent chat when requested (best-effort, after done:true)
+    should_archive = payload.archive if payload.archive is not None else PROXY_AUTO_ARCHIVE
+    if should_archive:
+        archiver = client.with_token(bearer)
+        for outcome in outcomes:
+            if outcome.subagent_chat_id:
+                try:
+                    archiver.archive_chat(outcome.subagent_chat_id)
+                except AuthExpiredError:
+                    logger.warning(
+                        "Archive skipped for chat %s: auth rejected", outcome.subagent_chat_id
+                    )
+                except Exception as exc:
+                    logger.debug("Archive failed for chat %s: %s", outcome.subagent_chat_id, exc)
+
     return BatchChatResponse(
         results=results,
         max_subagents=MAX_BATCH_SUBAGENTS,
